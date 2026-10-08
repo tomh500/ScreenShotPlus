@@ -129,11 +129,17 @@
     <ClInclude Include="targetver.h" />
     <ClInclude Include="ui.h" />
     <ClInclude Include="app.h" />
+    <ClInclude Include="capture.h" />
+    <ClInclude Include="storage.h" />
+    <ClInclude Include="preview.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="ScreenShotPlus.cpp" />
     <ClCompile Include="ui.cpp" />
     <ClCompile Include="app.cpp" />
+    <ClCompile Include="capture.cpp" />
+    <ClCompile Include="storage.cpp" />
+    <ClCompile Include="preview.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="ScreenShotPlus.rc" />

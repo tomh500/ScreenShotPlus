@@ -1,23 +1,71 @@
 #include "app.h"
 #include "ui.h"
 #include "Resource.h"
+#include "capture.h"
+#include "storage.h"
+#include "preview.h"
 using namespace std;
 using namespace Gdiplus;
 namespace {
 struct App {
+    enum Phase { Idle, Selecting, Saving, Dragging } phase = Idle;
+    HINSTANCE instance = nullptr;
     HWND panel = nullptr;
     NOTIFYICONDATAW tray{sizeof(tray)};
     wstring notice = L"截图后自动保存，拖动缩略图即可分享。";
     POINT mouse{-1, -1};
     filesystem::path folder;
     UINT taskbarCreated = 0;
+    unique_ptr<Bitmap> latest, pending;
+    filesystem::path latestFile;
+    POINT latestPoint{}, pendingPoint{};
+    bool restorePreview = false;
 } app;
 const array<RectF, 5> buttons{{{24, 172, 372, 52}, {24, 236, 372, 44},
     {24, 292, 372, 44}, {24, 348, 372, 44}, {24, 404, 372, 44}}};
 const RectF closeButton{372, 16, 28, 28};
+const RectF retryButton{24, 460, 372, 44};
 void ShowPanel() {
-    ui::Place(app.panel, 420, 520); ShowWindow(app.panel, SW_SHOW);
+    if (app.phase != App::Idle) return;
+    ui::Place(app.panel, 420, 570); ShowWindow(app.panel, SW_SHOW);
     SetForegroundWindow(app.panel); InvalidateRect(app.panel, nullptr, FALSE);
+}
+void Notice(const wstring& text) { app.notice = text; ShowPanel(); }
+void LatestPreview() {
+    if (app.latest) ShowPreview(app.latest.get(), app.latestFile, app.latestPoint);
+    else Notice(L"还没有截图。先点击“开始区域截图”。");
+}
+void SavePending() {
+    if (!app.pending || app.phase != App::Idle) return;
+    app.phase = App::Saving;
+    filesystem::path file; wstring error;
+    const bool ok = SavePng(*app.pending, app.folder, file, error);
+    app.phase = App::Idle;
+    if (!ok) { Notice(error); return; }
+    HidePreview(); app.latest = move(app.pending); app.latestFile = move(file);
+    app.latestPoint = app.pendingPoint;
+    app.notice = L"已自动保存 PNG，可直接拖动缩略图分享。";
+    ShowWindow(app.panel, SW_HIDE); LatestPreview();
+}
+void StartCapture() {
+    if (app.phase != App::Idle) return;
+    app.restorePreview = PreviewVisible();
+    ShowWindow(app.panel, SW_HIDE); HidePreview(); DwmFlush();
+    app.phase = App::Selecting;
+    wstring error;
+    if (!BeginSelection(app.instance, [](unique_ptr<Bitmap> image, POINT point, wstring failure) {
+        app.phase = App::Idle;
+        if (!image) {
+            if (app.restorePreview && app.latest) LatestPreview();
+            if (!failure.empty()) Notice(failure);
+            return;
+        }
+        app.pending = move(image); app.pendingPoint = point; SavePending();
+    }, error)) {
+        app.phase = App::Idle;
+        if (app.restorePreview && app.latest) LatestPreview();
+        Notice(error);
+    }
 }
 void AddTray() {
     Shell_NotifyIconW(NIM_ADD, &app.tray); app.tray.uVersion = NOTIFYICON_VERSION_4;
@@ -35,7 +83,8 @@ void DrawPanel(HWND hwnd) {
         L"打开保存目录", L"设置", L"退出程序"};
     for (size_t i = 0; i < buttons.size(); ++i)
         ui::Button(g, buttons[i], labels[i], i == 0, ui::Inside(app.mouse, buttons[i]));
-    ui::Text(g, L"关闭此面板后，程序仍在托盘运行", {24, 476, 372, 24}, 12, ui::muted);
+    if (app.pending) ui::Button(g, retryButton, L"重试保存未保存的截图", false, ui::Inside(app.mouse, retryButton));
+    ui::Text(g, L"关闭此面板后，程序仍在托盘运行", {24, 530, 372, 24}, 12, ui::muted);
 }
 LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     if (app.taskbarCreated && message == app.taskbarCreated) { AddTray(); return 0; }
@@ -47,8 +96,7 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
     case WM_TRAY:
         if (LOWORD(lparam) == NIN_SELECT || LOWORD(lparam) == NIN_KEYSELECT || LOWORD(lparam) == WM_CONTEXTMENU) ShowPanel();
         return 0;
-    case WM_HOTKEY:
-        app.notice = L"程序骨架已就绪；截图模块将在下一阶段接入。"; ShowPanel(); return 0;
+    case WM_HOTKEY: StartCapture(); return 0;
     case WM_MOUSEMOVE: {
         app.mouse = ui::Mouse(hwnd, lparam);
         TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, hwnd, 0}; TrackMouseEvent(&track);
@@ -64,10 +112,19 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
     case WM_LBUTTONUP: {
         const POINT p = ui::Mouse(hwnd, lparam);
         if (ui::Inside(p, closeButton)) { ShowWindow(hwnd, SW_HIDE); return 0; }
+        if (app.pending && ui::Inside(p, retryButton)) { SavePending(); return 0; }
         for (size_t i = 0; i < buttons.size(); ++i) if (ui::Inside(p, buttons[i])) {
-            if (i == 2) ui::OpenFolder(app.folder);
+            if (i == 0) StartCapture();
+            else if (i == 1) LatestPreview();
+            else if (i == 2) ui::OpenFolder(app.folder);
+            else if (i == 3) {
+                if (ui::PickFolder(hwnd, app.folder)) {
+                    app.notice = L"本次运行的保存目录已更新。";
+                    if (app.pending) SavePending();
+                    else InvalidateRect(hwnd, nullptr, FALSE);
+                }
+            }
             else if (i == 4) DestroyWindow(hwnd);
-            else { app.notice = L"程序骨架已就绪；功能将在后续阶段接入。"; InvalidateRect(hwnd, nullptr, FALSE); }
         }
         return 0;
     }
@@ -78,12 +135,14 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
         return 0;
     }
     case WM_DESTROY:
-        Shell_NotifyIconW(NIM_DELETE, &app.tray); UnregisterHotKey(hwnd, 1); PostQuitMessage(0); return 0;
+        Shell_NotifyIconW(NIM_DELETE, &app.tray); UnregisterHotKey(hwnd, 1);
+        DestroyPreview(); app.latest.reset(); app.pending.reset(); PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(hwnd, message, wparam, lparam);
 }
 }
 int RunApp(HINSTANCE instance) {
+    app.instance = instance;
     app.folder = ui::KnownFolder(FOLDERID_Pictures) / L"ScreenShotPlus";
     app.taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
     WNDCLASSEXW cls{sizeof(cls)};
@@ -93,6 +152,9 @@ int RunApp(HINSTANCE instance) {
     app.panel = CreateWindowExW(WS_EX_TOOLWINDOW, PANEL_CLASS, L"ScreenShotPlus", WS_POPUP,
         0, 0, 420, 520, nullptr, nullptr, instance, nullptr);
     if (!app.panel) return 5;
+    if (!InitPreview(instance, [] { Notice(L"截图已保存；文件拖放模块将在下一阶段接入。"); })) {
+        DestroyWindow(app.panel); return 7;
+    }
     ui::Corners(app.panel);
     app.tray.hWnd = app.panel; app.tray.uID = 1;
     app.tray.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;

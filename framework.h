@@ -1,15 +1,28 @@
-﻿// header.h: 标准系统包含文件的包含文件，
-// 或特定于项目的包含文件
-//
-
 #pragma once
-
-#include "targetver.h"
-#define WIN32_LEAN_AND_MEAN             // 从 Windows 头文件中排除极少使用的内容
-// Windows 头文件
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
-// C 运行时头文件
-#include <stdlib.h>
-#include <malloc.h>
-#include <memory.h>
-#include <tchar.h>
+#include <windowsx.h>
+#include <objidl.h>
+#include <gdiplus.h>
+#include <shellapi.h>
+#include <shlobj.h>
+#include <shobjidl.h>
+#include <dwmapi.h>
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
+inline constexpr UINT WM_TRAY = WM_APP + 1;
+inline constexpr UINT WM_SHOW_PANEL = WM_APP + 2;
+inline constexpr wchar_t PANEL_CLASS[] = L"ScreenShotPlus.Panel";

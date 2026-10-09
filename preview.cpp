@@ -10,11 +10,11 @@ struct Preview {
     POINT mouse{-1, -1}, pressed{};
     bool pressing = false, dragging = false;
     ULONGLONG remaining = 0, lastTick = 0;
-    function<void()> drag;
+    function<void()> drag, edit;
 } preview;
 const RectF closeButton{278, 12, 28, 28}, imageRect{16, 52, 288, 166};
-void DrawPreview(HWND hwnd) {
-    ui::Paint paint(hwnd); Graphics g(paint.buffer); ui::Prepare(g, hwnd);
+void DrawPreview(HWND hwnd, HDC target = nullptr) {
+    ui::Paint paint(hwnd, target); Graphics g(paint.buffer); ui::Prepare(g, hwnd);
     ui::Text(g, L"已保存 PNG", {16, 17, 240, 26}, 14, ui::accent, true);
     ui::Button(g, closeButton, L"×", false, ui::Inside(preview.mouse, closeButton));
     ui::Round(g, imageRect, 10, ui::surface);
@@ -25,12 +25,13 @@ void DrawPreview(HWND hwnd) {
         g.DrawImage(preview.image, RectF(imageRect.X + (imageRect.Width - w) / 2,
             imageRect.Y + (imageRect.Height - h) / 2, w, h));
     }
-    ui::Text(g, L"拖动图片到聊天窗口或文件夹", {16, 231, 288, 24}, 13);
+    ui::Text(g, L"单击编辑 · 拖动到聊天窗口或文件夹", {16, 231, 288, 24}, 12);
     ui::Text(g, preview.file.filename().wstring(), {16, 259, 288, 22}, 10, ui::muted);
 }
 LRESULT CALLBACK PreviewProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     switch (msg) {
     case WM_PAINT: DrawPreview(hwnd); return 0;
+    case WM_PRINTCLIENT: DrawPreview(hwnd, reinterpret_cast<HDC>(wparam)); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
     case WM_CLOSE: HidePreview(); return 0;
@@ -42,7 +43,17 @@ LRESULT CALLBACK PreviewProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
         }
         return 0;
     }
-    case WM_LBUTTONUP: preview.pressing = false; if (GetCapture() == hwnd) ReleaseCapture(); return 0;
+    case WM_LBUTTONUP: {
+        const bool clicked = preview.pressing && !preview.dragging;
+        preview.pressing = false;
+        if (GetCapture() == hwnd) ReleaseCapture();
+        const POINT p = ui::Mouse(hwnd, lparam);
+        const int dx = abs(GET_X_LPARAM(lparam) - preview.pressed.x), dy = abs(GET_Y_LPARAM(lparam) - preview.pressed.y);
+        if (clicked && ui::Inside(p, imageRect) &&
+            dx < GetSystemMetricsForDpi(SM_CXDRAG, GetDpiForWindow(hwnd)) &&
+            dy < GetSystemMetricsForDpi(SM_CYDRAG, GetDpiForWindow(hwnd)) && preview.edit) preview.edit();
+        return 0;
+    }
     case WM_CAPTURECHANGED: preview.pressing = false; return 0;
     case WM_MOUSEMOVE: {
         preview.mouse = ui::Mouse(hwnd, lparam);
@@ -77,7 +88,7 @@ LRESULT CALLBACK PreviewProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
     return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 }
-bool InitPreview(HINSTANCE instance, function<void()> drag) {
+bool InitPreview(HINSTANCE instance, function<void()> drag, function<void()> edit) {
     WNDCLASSEXW cls{sizeof(cls)};
     cls.hInstance = instance; cls.lpfnWndProc = PreviewProc; cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     cls.lpszClassName = L"ScreenShotPlus.Preview";
@@ -85,7 +96,7 @@ bool InitPreview(HINSTANCE instance, function<void()> drag) {
     if (!GetClassInfoExW(instance, cls.lpszClassName, &existing) && !RegisterClassExW(&cls)) return false;
     preview.window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
         cls.lpszClassName, L"ScreenShotPlus 最新截图", WS_POPUP, 0, 0, 320, 294, nullptr, nullptr, instance, nullptr);
-    preview.drag = move(drag);
+    preview.drag = move(drag); preview.edit = move(edit);
     if (preview.window) ui::Corners(preview.window);
     return preview.window != nullptr;
 }
@@ -107,5 +118,5 @@ void HidePreview() {
 bool PreviewVisible() { return preview.window && IsWindowVisible(preview.window); }
 void DestroyPreview() {
     if (preview.window) { KillTimer(preview.window, 1); DestroyWindow(preview.window); preview.window = nullptr; }
-    preview.image = nullptr; preview.drag = {};
+    preview.image = nullptr; preview.drag = {}; preview.edit = {};
 }

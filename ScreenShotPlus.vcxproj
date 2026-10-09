@@ -139,6 +139,7 @@
     <ClInclude Include="dragdrop.h" />
     <ClInclude Include="hotkeys.h" />
     <ClInclude Include="startup.h" />
+    <ClInclude Include="annotation.h" /><ClInclude Include="editor.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="ScreenShotPlus.cpp" />
@@ -152,6 +153,7 @@
     <ClCompile Include="dragdrop.cpp" />
     <ClCompile Include="hotkeys.cpp" />
     <ClCompile Include="startup.cpp" />
+    <ClCompile Include="annotation.cpp" /><ClCompile Include="editor.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="ScreenShotPlus.rc" />
@@ -170,7 +172,7 @@
       <RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>gdiplus.lib;advapi32.lib;dwmapi.lib;ole32.lib;shell32.lib;uuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>gdiplus.lib;advapi32.lib;imm32.lib;dwmapi.lib;ole32.lib;shell32.lib;uuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
       <AdditionalManifestFiles>app.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles>

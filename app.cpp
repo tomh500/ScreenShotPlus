@@ -8,11 +8,12 @@
 #include "settings.h"
 #include "dragdrop.h"
 #include "hotkeys.h"
+#include "editor.h"
 using namespace std;
 using namespace Gdiplus;
 namespace {
 struct App {
-    enum Phase { Idle, Selecting, Saving, Dragging } phase = Idle;
+    enum Phase { Idle, Selecting, Saving, Dragging, Editing } phase = Idle;
     HINSTANCE instance = nullptr;
     HWND panel = nullptr;
     NOTIFYICONDATAW tray{sizeof(tray)};
@@ -35,7 +36,9 @@ const array<RectF, 5> buttons{{{24, 172, 372, 52}, {24, 236, 372, 44},
 const RectF closeButton{372, 16, 28, 28};
 const RectF retryButton{24, 460, 372, 44};
 void ShowPanel() {
-    if (app.exiting || app.phase != App::Idle) return;
+    if (app.exiting) return;
+    if (app.phase == App::Editing) { FocusEditor(); return; }
+    if (app.phase != App::Idle) return;
     if (SettingsVisible()) { ShowSettings(app.config); return; }
     ui::Place(app.panel, 420, 570); ShowWindow(app.panel, SW_SHOW);
     SetForegroundWindow(app.panel); InvalidateRect(app.panel, nullptr, FALSE);
@@ -90,6 +93,25 @@ void DragLatest() {
         InvalidateRect(app.panel, nullptr, FALSE);
     }
 }
+void EditLatest() {
+    if (app.phase != App::Idle || !app.latest || SettingsVisible() || app.exiting) return;
+    app.phase = App::Editing;
+    ShowWindow(app.panel, SW_HIDE); HidePreview();
+    wstring error;
+    if (!ShowEditor(*app.latest, error)) { app.phase = App::Idle; LatestPreview(); Notice(error); }
+}
+bool SaveEdited(unique_ptr<Bitmap>& image, wstring& error) {
+    if (app.exiting || app.phase != App::Editing || !image) return false;
+    filesystem::path file;
+    if (!SavePng(*image, app.config.folder, file, error)) return false;
+    HidePreview(); app.latest = move(image); app.latestFile = move(file);
+    app.phase = App::Idle; app.notice = L"编辑后的 PNG 已保存，拖动缩略图即可分享。";
+    LatestPreview(); return true;
+}
+void CancelEdit() {
+    if (app.exiting) return;
+    app.phase = App::Idle; LatestPreview();
+}
 bool ApplyConfig(const Config& next, wstring& error) {
     if (!ApplyConfiguredSettings(app.panel, app.hotkeys, app.config, next, app.configFile, error, app.startupKey.c_str())) return false;
     if (PreviewVisible()) LatestPreview();
@@ -99,8 +121,8 @@ void AddTray() {
     Shell_NotifyIconW(NIM_ADD, &app.tray); app.tray.uVersion = NOTIFYICON_VERSION_4;
     Shell_NotifyIconW(NIM_SETVERSION, &app.tray);
 }
-void DrawPanel(HWND hwnd) {
-    ui::Paint paint(hwnd); Graphics g(paint.buffer); ui::Prepare(g, hwnd);
+void DrawPanel(HWND hwnd, HDC target = nullptr) {
+    ui::Paint paint(hwnd, target); Graphics g(paint.buffer); ui::Prepare(g, hwnd);
     ui::Round(g, {24, 24, 40, 40}, 12, ui::accent);
     ui::Text(g, L"S", {35, 29, 30, 34}, 24, ui::background, true);
     ui::Text(g, L"ScreenShotPlus", {78, 27, 278, 36}, 23, ui::foreground, true);
@@ -118,6 +140,7 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
     if (app.taskbarCreated && message == app.taskbarCreated) { AddTray(); return 0; }
     switch (message) {
     case WM_PAINT: DrawPanel(hwnd); return 0;
+    case WM_PRINTCLIENT: DrawPanel(hwnd, reinterpret_cast<HDC>(wparam)); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_SHOW_PANEL: ShowPanel(); return 0;
     case WM_CLOSE: ShowWindow(hwnd, SW_HIDE); return 0;
@@ -178,7 +201,7 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
         app.exiting = true; CancelSelection();
         Shell_NotifyIconW(NIM_DELETE, &app.tray);
         ReleaseHotkeys(hwnd, app.hotkeys);
-        DestroySettings(); DestroyPreview(); app.latest.reset(); app.pending.reset(); PostQuitMessage(0); return 0;
+        DestroyEditor(); DestroySettings(); DestroyPreview(); app.latest.reset(); app.pending.reset(); PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(hwnd, message, wparam, lparam);
 }
@@ -197,7 +220,8 @@ int RunApp(HINSTANCE instance, const filesystem::path& configFile, bool trayStar
     app.panel = CreateWindowExW(WS_EX_TOOLWINDOW, PANEL_CLASS, L"ScreenShotPlus", WS_POPUP,
         0, 0, 420, 520, nullptr, nullptr, instance, nullptr);
     if (!app.panel) return 5;
-    if (!InitPreview(instance, DragLatest) || !InitSettings(instance, app.panel, ApplyConfig)) {
+    if (!InitPreview(instance, DragLatest, EditLatest) || !InitSettings(instance, app.panel, ApplyConfig) ||
+        !InitEditor(instance, app.panel, SaveEdited, CancelEdit)) {
         DestroyWindow(app.panel); return 7;
     }
     ui::Corners(app.panel);

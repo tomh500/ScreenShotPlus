@@ -15,8 +15,8 @@ const RectF closeButton{452, 16, 28, 28}, folderButton{24, 180, 452, 44},
     hotkeyButton{24, 272, 452, 44}, printButton{24, 336, 452, 44},
     secondsButton{24, 450, 452, 44}, startupButton{24, 542, 452, 44},
     saveButton{24, 652, 218, 44}, cancelButton{254, 652, 222, 44};
-void DrawSettings(HWND hwnd) {
-    ui::Paint paint(hwnd); Graphics g(paint.buffer); ui::Prepare(g, hwnd);
+void DrawSettings(HWND hwnd, HDC target = nullptr) {
+    ui::Paint paint(hwnd, target); Graphics g(paint.buffer); ui::Prepare(g, hwnd);
     ui::Text(g, L"设置", {24, 25, 390, 40}, 25, ui::foreground, true);
     ui::Button(g, closeButton, L"×", false, ui::Inside(settings.mouse, closeButton));
     ui::Text(g, L"保存目录", {24, 90, 452, 26}, 14, ui::muted);
@@ -44,6 +44,7 @@ void Cancel() { HideSettings(); PostMessageW(settings.owner, WM_SHOW_PANEL, 0, 0
 LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     switch (msg) {
     case WM_PAINT: DrawSettings(hwnd); return 0;
+    case WM_PRINTCLIENT: DrawSettings(hwnd, reinterpret_cast<HDC>(wparam)); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_CLOSE: Cancel(); return 0;
     case WM_MOUSEMOVE: {

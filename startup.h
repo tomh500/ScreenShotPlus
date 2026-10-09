@@ -9,4 +9,5 @@ struct StartupEntry {
 bool ReadStartupEntry(const wchar_t* key, StartupEntry& entry, std::wstring& error);
 bool WriteStartupEntry(const wchar_t* key, const StartupEntry& entry, std::wstring& error);
 bool SetStartup(const wchar_t* key, bool enabled, std::wstring& error);
+std::wstring StartupCommand(const std::filesystem::path& executable, std::wstring& error);
 bool TrayStartupRequested();

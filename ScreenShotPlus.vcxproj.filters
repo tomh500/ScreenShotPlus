@@ -33,6 +33,7 @@
     <ClCompile Include="dragdrop.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="annotation.cpp"><Filter>源文件</Filter></ClCompile><ClCompile Include="editor.cpp"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="startup.cpp"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="hotkeys.cpp">
       <Filter>源文件</Filter>
@@ -75,6 +76,7 @@
     <ClInclude Include="dragdrop.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="annotation.h"><Filter>头文件</Filter></ClInclude><ClInclude Include="editor.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="startup.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="hotkeys.h">
       <Filter>头文件</Filter>

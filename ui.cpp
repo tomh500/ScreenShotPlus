@@ -2,8 +2,8 @@
 using namespace std;
 using namespace Gdiplus;
 namespace ui {
-Paint::Paint(HWND hwnd) : window(hwnd) {
-    dc = BeginPaint(window, &ps);
+Paint::Paint(HWND hwnd, HDC target) : window(hwnd), printing(target != nullptr) {
+    dc = target ? target : BeginPaint(window, &ps);
     RECT r{}; GetClientRect(window, &r);
     width = max(1L, r.right); height = max(1L, r.bottom);
     buffer = CreateCompatibleDC(dc);
@@ -20,7 +20,7 @@ Paint::~Paint() {
         BitBlt(dc, 0, 0, width, height, buffer, 0, 0, SRCCOPY);
         SelectObject(buffer, old); DeleteObject(bitmap); DeleteDC(buffer);
     }
-    EndPaint(window, &ps);
+    if (!printing) EndPaint(window, &ps);
 }
 float Scale(HWND hwnd) {
     const auto fitted = reinterpret_cast<UINT_PTR>(GetPropW(hwnd, L"ScreenShotPlus.UiScale"));

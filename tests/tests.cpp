@@ -7,6 +7,8 @@
 #include "settings.h"
 #include "ui.h"
 #include "hotkeys.h"
+#include "annotation.h"
+#include "editor.h"
 #include <nlohmann/json.hpp>
 #include <atomic>
 #include <iostream>
@@ -37,13 +39,29 @@ void Click(HWND window, int x, int y) {
     SendMessageTimeoutW(window, WM_LBUTTONUP, 0, MAKELPARAM(static_cast<int>(x * scale), static_cast<int>(y * scale)),
         SMTO_ABORTIFHUNG, 1000, nullptr);
 }
+HWND OwnWindow(const wchar_t* className) {
+    struct Search { const wchar_t* name; HWND window = nullptr; } search{className};
+    EnumWindows([](HWND hwnd, LPARAM param) -> BOOL {
+        auto& search = *reinterpret_cast<Search*>(param);
+        DWORD pid = 0; GetWindowThreadProcessId(hwnd, &pid);
+        wchar_t name[128]{}; GetClassNameW(hwnd, name, 128);
+        if (pid == GetCurrentProcessId() && wstring_view(name) == search.name) { search.window = hwnd; return FALSE; }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&search));
+    return search.window;
+}
+void Pointer(HWND hwnd, UINT message, int x, int y, WPARAM keys = 0) {
+    const float scale = ui::Scale(hwnd);
+    SendMessageW(hwnd, message, keys, MAKELPARAM(static_cast<int>(x * scale), static_cast<int>(y * scale)));
+}
 void Snapshot(HWND hwnd, const filesystem::path& folder) {
     UpdateWindow(hwnd);
     RECT rect{}; GetClientRect(hwnd, &rect);
     HDC dc = GetDC(hwnd), memory = CreateCompatibleDC(dc);
     HBITMAP bitmap = CreateCompatibleBitmap(dc, rect.right, rect.bottom);
     HGDIOBJ old = SelectObject(memory, bitmap);
-    const bool copied = BitBlt(memory, 0, 0, rect.right, rect.bottom, dc, 0, 0, SRCCOPY) != FALSE;
+    const bool copied = SendMessageTimeoutW(hwnd, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(memory), PRF_CLIENT,
+        SMTO_ABORTIFHUNG, 2000, nullptr) != 0;
     SelectObject(memory, old); DeleteDC(memory); ReleaseDC(hwnd, dc);
     bool saved = false;
     if (copied) {
@@ -64,6 +82,28 @@ void Geometry() {
     // Physical points on a virtual desktop whose origin is (-1920, -1080).
     r = SelectionRect({1700, 900}, {2300, 1300}, 3840, 2160);
     Check(r.left - 1920 == -220 && r.right - 1920 == 380 && r.bottom - r.top == 400, "cross-origin geometry");
+}
+void FileTransfer(const filesystem::path& file);
+void AnnotationPixels(const filesystem::path& root) {
+    Bitmap source(160, 100, PixelFormat32bppARGB);
+    { Graphics g(&source); g.Clear(Color(255, 245, 245, 245)); }
+    Annotation stroke; stroke.points = {{10, 15}, {100, 15}}; stroke.size = 6; stroke.color = Color(255, 255, 0, 0);
+    Annotation dot; dot.points = {{25, 35}}; dot.size = 8; dot.color = Color(255, 0, 96, 255);
+    Annotation text; text.kind = Annotation::Text; text.points = {{10, 50}}; text.size = 24; text.text = L"标注 Test";
+    text.color = Color(255, 0, 180, 0);
+    wstring error; auto result = RenderAnnotations(source, {stroke, dot, text}, error);
+    Check(result && result->GetWidth() == 160 && result->GetHeight() == 100, "edited image retains physical dimensions");
+    Color pixel; result->GetPixel(50, 15, &pixel); Check(pixel.GetR() == 255 && pixel.GetG() == 0 && pixel.GetA() == 255, "stroke saved in physical pixels");
+    result->GetPixel(25, 35, &pixel); Check(pixel.GetB() == 255 && pixel.GetR() == 0, "single click brush dot");
+    bool textFound = false;
+    for (int y = 50; y < 90; ++y) for (int x = 10; x < 150; ++x) {
+        result->GetPixel(x, y, &pixel); if (pixel.GetG() > pixel.GetR() + 30 && pixel.GetG() > pixel.GetB() + 30) textFound = true;
+    }
+    Check(textFound, "colored Unicode text rasterized");
+    source.GetPixel(50, 15, &pixel); Check(pixel.GetR() == 245 && pixel.GetG() == 245, "source image unchanged");
+    filesystem::path file; Check(SavePng(*result, root / L"编辑后的图片", file, error), "edited PNG saved");
+    { Bitmap decoded(file.c_str()); decoded.GetPixel(50, 15, &pixel); Check(pixel.GetR() == 255 && pixel.GetG() == 0 && decoded.GetWidth() == 160, "edited PNG pixel round trip"); }
+    FileTransfer(file);
 }
 void Configuration(const filesystem::path& root) {
     const auto file = root / L"设置" / L"config.json";
@@ -92,6 +132,8 @@ void Configuration(const filesystem::path& root) {
     { ofstream out(root / L"blocked"); out << "original"; }
     Check(!SaveConfig(root / L"blocked" / L"config.json", c, error), "config write failure");
     c.modifiers = 0; Check(!ValidConfig(c), "bare key rejected");
+    Check(StartupCommand(L"C:\\便携 工具\\ScreenShotPlus.exe", error) == L"\"C:\\便携 工具\\ScreenShotPlus.exe\" --tray", "startup command quotes Unicode spaced paths");
+    Check(StartupCommand(filesystem::path(L"C:\\" + wstring(260, L'a') + L".exe"), error).empty(), "oversized Run command rejected");
 }
 filesystem::path PngStorage(const filesystem::path& root) {
     Bitmap image(17, 23, PixelFormat32bppRGB);
@@ -141,6 +183,61 @@ void FileTransfer(const filesystem::path& file) {
     DWORD copy = 123;
     Check(FAILED(DragFile(file.parent_path() / L"missing.png", copy)) && copy == DROPEFFECT_NONE, "missing source handled");
     Check(filesystem::exists(file), "source preserved");
+}
+void EditorUi(HINSTANCE instance, const filesystem::path& root) {
+    Bitmap source(640, 360, PixelFormat32bppARGB);
+    { Graphics g(&source); g.Clear(Color(255, 245, 245, 245)); }
+    unique_ptr<Bitmap> saved; filesystem::path file; int attempts = 0, canceled = 0;
+    Check(InitEditor(instance, nullptr, [&](unique_ptr<Bitmap>& image, wstring& error) {
+        ++attempts;
+        if (attempts == 1) return SavePng(*image, root / L"blocked", file, error);
+        if (!SavePng(*image, root / L"editor-ui-results", file, error)) return false;
+        saved = move(image); return true;
+    }, [&] { ++canceled; }), "initialize custom editor");
+    wstring error; Check(ShowEditor(source, error), "open editor");
+    HWND hwnd = OwnWindow(L"ScreenShotPlus.Editor"); Check(hwnd && EditorVisible(), "editor window visible");
+    Pointer(hwnd, WM_LBUTTONDOWN, 240, 247, MK_LBUTTON);
+    Pointer(hwnd, WM_MOUSEMOVE, 320, 247, MK_LBUTTON);
+    Pointer(hwnd, WM_LBUTTONUP, 400, 247);
+    Click(hwnd, 250, 267); Click(hwnd, 520, 96);
+    Click(hwnd, 170, 96); Click(hwnd, 240, 307);
+    for (const wchar_t c : wstring(L"标注 A")) SendMessageW(hwnd, WM_CHAR, c, 0);
+    Click(hwnd, 442, 96); Click(hwnd, 442, 96);
+    Click(hwnd, 430, 144); Snapshot(hwnd, root / L"editor-text-ui");
+    SendMessageW(hwnd, WM_CHAR, L'\r', 0);
+    Click(hwnd, 245, 312); Click(hwnd, 510, 144);
+    Click(hwnd, 660, 96);
+    Click(hwnd, 910, 144); Click(hwnd, 870, 232); Click(hwnd, 814, 280); Click(hwnd, 934, 328);
+    Snapshot(hwnd, root / L"editor-rgb-ui");
+    Click(hwnd, 910, 144); Click(hwnd, 70, 96);
+    Pointer(hwnd, WM_LBUTTONDOWN, 240, 447, MK_LBUTTON);
+    Pointer(hwnd, WM_LBUTTONUP, 400, 447);
+    Snapshot(hwnd, root / L"editor-ui");
+    Click(hwnd, 900, 724);
+    Check(EditorVisible() && attempts == 1 && !saved, "save failure retains editor and annotations");
+    Snapshot(hwnd, root / L"editor-error-ui"); Click(hwnd, 900, 724);
+    Check(!EditorVisible() && saved && attempts == 2 && filesystem::exists(file), "retry saves edited PNG and closes editor");
+    Color pixel; saved->GetPixel(100, 40, &pixel); Check(pixel.GetR() == 255 && pixel.GetG() == 0, "editor brush coordinates map to image pixels");
+    saved->GetPixel(50, 60, &pixel); Check(pixel.GetR() == 245 && pixel.GetG() == 245, "editor undo removes latest dot");
+    saved->GetPixel(100, 240, &pixel);
+    Check(abs(pixel.GetR() - 128) <= 2 && abs(pixel.GetG() - 64) <= 2 && abs(pixel.GetB() - 200) <= 2, "RGB custom pen exported");
+    bool purple = false;
+    for (int y = 100; y < 150; ++y) for (int x = 40; x < 220; ++x) {
+        saved->GetPixel(x, y, &pixel); if (pixel.GetR() > pixel.GetG() + 50 && pixel.GetB() > pixel.GetG() + 50) purple = true;
+    }
+    Check(purple, "existing text size and color edits exported");
+    FileTransfer(file);
+    Check(ShowEditor(*saved, error), "reopen edited PNG"); Click(hwnd, 750, 724);
+    Check(!EditorVisible() && canceled == 1 && attempts == 2, "cancel preserves last saved image");
+    Bitmap large(1984, 828, PixelFormat32bppARGB);
+    { Graphics g(&large); g.Clear(Color(255, 245, 245, 245)); }
+    Check(ShowEditor(large, error), "open image larger than editor canvas");
+    Pointer(hwnd, WM_LBUTTONDOWN, 124, 280, MK_LBUTTON);
+    Pointer(hwnd, WM_LBUTTONUP, 224, 280); Click(hwnd, 900, 724);
+    saved->GetPixel(300, 200, &pixel);
+    Check(saved->GetWidth() == 1984 && saved->GetHeight() == 828 && pixel.GetR() == 255 && pixel.GetG() == 0,
+        "scaled-down canvas maps annotation to original physical pixels");
+    DestroyEditor();
 }
 void WritePermissions(const filesystem::path& root) {
     const auto folder = root / (L"permission-test-" + to_wstring(GetTickCount64()));
@@ -228,10 +325,10 @@ void CaptureAndPreview(HINSTANCE instance, const filesystem::path& root) {
     Check(GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) <= resources + 2, "capture GDI handles released");
     DestroyWindow(pattern);
     filesystem::path file; Check(SavePng(*result, root, file, error), "save actual cropped image");
-    bool dragged = false;
+    bool dragged = false, edited = false;
     Check(InitPreview(instance, [&] {
         dragged = true; Pump(1300); Check(PreviewVisible(), "timer paused during drag callback");
-    }), "preview initialization");
+    }, [&] { edited = true; }), "preview initialization");
     const HWND foreground = GetForegroundWindow();
     ShowPreview(result.get(), file, finished, 0);
     Check(PreviewVisible() && GetForegroundWindow() == foreground, "preview does not activate");
@@ -239,7 +336,8 @@ void CaptureAndPreview(HINSTANCE instance, const filesystem::path& root) {
     Pump(150); Check(PreviewVisible(), "persistent preview"); HidePreview();
     Check(!PreviewVisible() && filesystem::exists(file), "closing preview preserves PNG");
     ShowPreview(result.get(), file, finished, 1);
-    HWND preview = FindWindowW(L"ScreenShotPlus.Preview", nullptr);
+    HWND preview = OwnWindow(L"ScreenShotPlus.Preview");
+    Click(preview, 100, 100); Check(edited && !dragged, "preview click edits without dragging"); edited = false;
     RECT rect{}; GetWindowRect(preview, &rect); POINT cursor{}; GetCursorPos(&cursor);
     SetWindowPos(preview, nullptr, cursor.x - (rect.right - rect.left) / 2, cursor.y - (rect.bottom - rect.top) / 2,
         0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER);
@@ -250,7 +348,8 @@ void CaptureAndPreview(HINSTANCE instance, const filesystem::path& root) {
     const float scale = ui::Scale(preview);
     SendMessageW(preview, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(static_cast<int>(100 * scale), static_cast<int>(100 * scale)));
     SendMessageW(preview, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(static_cast<int>(140 * scale), static_cast<int>(100 * scale)));
-    Check(dragged && PreviewVisible(), "drag threshold and paused timer");
+    Pointer(preview, WM_LBUTTONUP, 140, 100);
+    Check(dragged && !edited && PreviewVisible(), "drag threshold and paused timer without editor");
     Pump(1300); Check(!PreviewVisible(), "preview timer expires"); DestroyPreview();
 }
 bool ProbeHotkey(UINT modifiers, UINT key) {
@@ -291,6 +390,7 @@ void HotkeyTransactions(HINSTANCE instance, const filesystem::path& root) {
     next.startup = true;
     const bool startupAvailable = ApplyConfiguredSettings(window, state, current, next, file, error, startup.key.c_str());
     if (!startupAvailable) {
+        Check(error.find(L"错误 5") != wstring::npos, "startup skip is only allowed for real access denial");
         Check(current.key == VK_F24 && !current.startup && ProbeHotkey(current.modifiers, VK_F23), "startup failure rolls back hotkey");
         cout << "SKIP startup enable / disable / registry rollback: registry writes denied by execution environment\n";
         next.startup = false;
@@ -320,26 +420,32 @@ void HotkeyTransactions(HINSTANCE instance, const filesystem::path& root) {
     ReleaseHotkeys(window, state); DestroyWindow(window);
     Check(ProbeHotkey(current.modifiers, VK_F22), "shutdown releases hotkey");
 }
-bool AppSmoke(HINSTANCE instance, const filesystem::path& artifacts) {
+bool AppSmoke(HINSTANCE instance, const filesystem::path& artifacts, bool isolated = false) {
     TestStartupKey startupKey;
-    HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Local\\ScreenShotPlus.Singleton");
-    const DWORD created = GetLastError();
-    Check(mutex != nullptr, "singleton mutex available");
+    HANDLE mutex = isolated ? nullptr : CreateMutexW(nullptr, FALSE, L"Local\\ScreenShotPlus.Singleton");
+    const DWORD created = isolated ? ERROR_SUCCESS : GetLastError();
+    Check(isolated || mutex != nullptr, "singleton mutex available");
     if (created == ERROR_ALREADY_EXISTS) { CloseHandle(mutex); return false; }
     const auto file = artifacts / L"app-config" / L"config.json";
     Config initial = DefaultConfig(); initial.folder = artifacts / L"app-screens";
+    if (isolated) { initial.modifiers = MOD_CONTROL | MOD_ALT | MOD_SHIFT; initial.key = VK_F20; }
     wstring error; Check(SaveConfig(file, initial, error), "isolated application config");
     const DWORD uiThread = GetCurrentThreadId(); atomic<bool> ok = false;
     jthread observer([&] {
         HWND panel = nullptr;
         for (int i = 0; i < 50 && !panel; ++i) {
-            HWND candidate = FindWindowW(PANEL_CLASS, nullptr);
+            HWND candidate = OwnWindow(PANEL_CLASS);
             DWORD pid = 0; if (candidate) GetWindowThreadProcessId(candidate, &pid);
-            if (pid == GetCurrentProcessId() && IsWindowVisible(candidate)) panel = candidate;
+            if (pid == GetCurrentProcessId() && (isolated || IsWindowVisible(candidate))) panel = candidate;
             else this_thread::sleep_for(chrono::milliseconds(50));
         }
         try {
             Check(panel != nullptr, "app panel available");
+            if (isolated) {
+                Check(!IsWindowVisible(panel), "tray startup does not show panel");
+                SendMessageW(panel, WM_SHOW_PANEL, 0, 0);
+                Check(IsWindowVisible(panel), "tray startup panel can be opened");
+            } else {
             const auto executable = filesystem::current_path() / L"x64" / L"Release" / L"ScreenShotPlus.exe";
             STARTUPINFOW startup{sizeof(startup)}; startup.dwFlags = STARTF_USESHOWWINDOW; startup.wShowWindow = SW_HIDE;
             PROCESS_INFORMATION child{};
@@ -349,8 +455,9 @@ bool AppSmoke(HINSTANCE instance, const filesystem::path& artifacts) {
             DWORD exitCode = 1; GetExitCodeProcess(child.hProcess, &exitCode);
             CloseHandle(child.hThread); CloseHandle(child.hProcess);
             Check(waited == WAIT_OBJECT_0 && exitCode == 0, "second instance exits successfully");
+            }
             Snapshot(panel, artifacts / L"panel-ui"); Click(panel, 100, 370);
-            HWND settings = FindWindowW(L"ScreenShotPlus.Settings", nullptr);
+            HWND settings = OwnWindow(L"ScreenShotPlus.Settings");
             Check(settings && IsWindowVisible(settings), "settings opens");
             Snapshot(settings, artifacts / L"settings-ui");
             Click(settings, 100, 472); Click(settings, 100, 674);
@@ -362,7 +469,7 @@ bool AppSmoke(HINSTANCE instance, const filesystem::path& artifacts) {
                 100, 100, 400, 300, nullptr, nullptr, instance, nullptr);
             ShowWindow(pattern, SW_SHOWNOACTIVATE); UpdateWindow(pattern); DwmFlush();
             Click(panel, 100, 198);
-            HWND overlay = FindWindowW(L"ScreenShotPlus.Selection", nullptr);
+            HWND overlay = OwnWindow(L"ScreenShotPlus.Selection");
             Check(overlay != nullptr, "application starts region capture");
             const int x = 150 - GetSystemMetrics(SM_XVIRTUALSCREEN), y = 150 - GetSystemMetrics(SM_YVIRTUALSCREEN);
             SendMessageW(overlay, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, y));
@@ -373,28 +480,46 @@ bool AppSmoke(HINSTANCE instance, const filesystem::path& artifacts) {
             for (const auto& item : filesystem::directory_iterator(initial.folder)) if (item.path().extension() == L".png") screenshots.push_back(item.path());
             Check(screenshots.size() == 1, "exactly one screenshot auto saved");
             { Bitmap image(screenshots[0].c_str()); Check(image.GetWidth() == 80 && image.GetHeight() == 60, "application PNG dimensions"); }
+            HWND preview = OwnWindow(L"ScreenShotPlus.Preview"); Click(preview, 100, 100);
+            HWND editor = OwnWindow(L"ScreenShotPlus.Editor");
+            Check(EditorVisible() && !PreviewVisible(), "preview click opens editor and hides preview");
+            SendMessageW(panel, WM_HOTKEY, 1, 0); SendMessageW(panel, WM_SHOW_PANEL, 0, 0);
+            Check(!OwnWindow(L"ScreenShotPlus.Selection") && !IsWindowVisible(panel) && EditorVisible(), "editing blocks capture and panel");
+            Pointer(editor, WM_LBUTTONDOWN, 490, 370, MK_LBUTTON);
+            Pointer(editor, WM_LBUTTONUP, 540, 370); Click(editor, 900, 724);
+            Check(!EditorVisible() && PreviewVisible(), "edited save returns to preview");
+            vector<filesystem::path> editedFiles;
+            for (const auto& item : filesystem::directory_iterator(initial.folder))
+                if (item.path().extension() == L".png" && item.path() != screenshots[0]) editedFiles.push_back(item.path());
+            Check(editedFiles.size() == 1 && filesystem::exists(screenshots[0]), "edited image saved separately from original");
+            { Bitmap image(editedFiles[0].c_str()); Color pixel; image.GetPixel(30, 13, &pixel);
+                Check(image.GetWidth() == 80 && image.GetHeight() == 60 && pixel.GetR() == 255 && pixel.GetG() == 0, "application saves annotations at original resolution"); }
+            FileTransfer(editedFiles[0]);
+            Click(preview, 100, 100); Check(EditorVisible(), "edited preview can reopen editor");
+            SendMessageW(editor, WM_CLOSE, 0, 0); Check(PreviewVisible(), "cancel editing restores latest preview");
             SendMessageW(panel, WM_HOTKEY, 1, 0);
-            overlay = FindWindowW(L"ScreenShotPlus.Selection", nullptr);
+            overlay = OwnWindow(L"ScreenShotPlus.Selection");
             Check(overlay != nullptr && !PreviewVisible(), "next capture hides old preview");
             SendMessageW(panel, WM_HOTKEY, 1, 0); SendMessageW(panel, WM_SHOW_PANEL, 0, 0);
-            Check(FindWindowW(L"ScreenShotPlus.Selection", nullptr) == overlay && !IsWindowVisible(panel), "capture state prevents duplicate capture and panel");
+            Check(OwnWindow(L"ScreenShotPlus.Selection") == overlay && !IsWindowVisible(panel), "capture state prevents duplicate capture and panel");
             SendMessageW(overlay, WM_KEYDOWN, VK_ESCAPE, 0);
             Check(PreviewVisible() && filesystem::exists(screenshots[0]), "cancel restores previous saved preview");
             SendMessageW(panel, WM_SHOW_PANEL, 0, 0);
             Click(panel, 100, 425); ok = true;
         } catch (const exception& e) { cerr << "App smoke: " << e.what() << '\n'; PostThreadMessageW(uiThread, WM_QUIT, 1, 0); }
     });
-    const int result = RunApp(instance, file, false, startupKey.key.c_str());
-    CloseHandle(mutex);
+    const int result = RunApp(instance, file, isolated, startupKey.key.c_str());
+    if (mutex) CloseHandle(mutex);
     Check(result == 0, "app message loop / shutdown");
     observer.join(); Check(ok, "app startup / settings / exit");
     return true;
 }
 }
 int wmain(int argc, wchar_t** argv) {
+    const bool isolatedUi = argc > 1 && wstring_view(argv[1]) == L"--isolated-ui";
     bool liveUi = !(argc > 1 && wstring_view(argv[1]) == L"--no-ui");
     HANDLE running = OpenMutexW(SYNCHRONIZE, FALSE, L"Local\\ScreenShotPlus.Singleton");
-    if (running) { CloseHandle(running); liveUi = false; }
+    if (running) { CloseHandle(running); if (!isolatedUi) liveUi = false; }
     const HRESULT ole = OleInitialize(nullptr);
     if (FAILED(ole)) return 2;
     GdiplusStartupInput input; ULONG_PTR token = 0;
@@ -407,17 +532,20 @@ int wmain(int argc, wchar_t** argv) {
         Configuration(root); cout << "PASS config round trip / corrupt and unwritable paths\n";
         const auto file = PngStorage(root); cout << "PASS PNG pixels / Unicode paths / unique saves\n";
         FileTransfer(file); cout << "PASS Unicode file transfer / copy-only format\n";
+        AnnotationPixels(root); cout << "PASS physical-pixel stroke / dot / Unicode text / edited PNG transfer\n";
         WritePermissions(root); cout << "PASS real ACL write denial / original config preserved / permissions restored\n";
         if (liveUi) {
             CaptureAndPreview(GetModuleHandleW(nullptr), root); cout << "PASS live capture / cancel / preview / timeout\n";
+            EditorUi(GetModuleHandleW(nullptr), root); cout << "PASS editor brush / RGB / text / undo / failed save retry / cancel\n";
         } else cout << "SKIP live capture and preview UI: --no-ui or existing application instance\n";
         HotkeyTransactions(GetModuleHandleW(nullptr), root); cout << "PASS real hotkey conflict / change / write-failure rollback\n";
-        if (liveUi && AppSmoke(GetModuleHandleW(nullptr), root))
-            cout << "PASS application capture / persistence / state / single instance / shutdown\n";
+        if (liveUi && AppSmoke(GetModuleHandleW(nullptr), root, isolatedUi))
+            cout << (isolatedUi ? "PASS isolated application tray startup / capture / edit / preview / state / shutdown (single-instance test skipped)\n" :
+                "PASS application capture / edit / persistence / state / single instance / shutdown\n");
         else cout << "SKIP application UI smoke: --no-ui or existing application instance\n";
         cout << "Monitors actually present: " << GetSystemMetrics(SM_CMONITORS) << '\n';
         wcout << L"Test artifacts: " << root.wstring() << L'\n';
     } catch (const exception& e) { cerr << "FAIL: " << e.what() << '\n'; code = 1; }
-    CancelSelection(); DestroySettings(); DestroyPreview();
+    CancelSelection(); DestroyEditor(); DestroySettings(); DestroyPreview();
     GdiplusShutdown(token); OleUninitialize(); return code;
 }

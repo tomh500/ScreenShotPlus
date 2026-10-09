@@ -19,6 +19,7 @@
     </ProjectConfiguration>
   </ItemGroup>
   <PropertyGroup Label="Globals">
+    <VCPkgLocalAppDataDisabled>true</VCPkgLocalAppDataDisabled>
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
     <ProjectGuid>{64587e9c-56dc-49c4-b1d7-d04d620811b7}</ProjectGuid>
@@ -53,6 +54,7 @@
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <Import Project="Dependencies.props" />
   <ImportGroup Label="ExtensionSettings">
   </ImportGroup>
   <ImportGroup Label="Shared">
@@ -127,9 +129,27 @@
     <ClInclude Include="Resource.h" />
     <ClInclude Include="ScreenShotPlus.h" />
     <ClInclude Include="targetver.h" />
+    <ClInclude Include="ui.h" />
+    <ClInclude Include="app.h" />
+    <ClInclude Include="capture.h" />
+    <ClInclude Include="storage.h" />
+    <ClInclude Include="preview.h" />
+    <ClInclude Include="config.h" />
+    <ClInclude Include="settings.h" />
+    <ClInclude Include="dragdrop.h" />
+    <ClInclude Include="hotkeys.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="ScreenShotPlus.cpp" />
+    <ClCompile Include="ui.cpp" />
+    <ClCompile Include="app.cpp" />
+    <ClCompile Include="capture.cpp" />
+    <ClCompile Include="storage.cpp" />
+    <ClCompile Include="preview.cpp" />
+    <ClCompile Include="config.cpp" />
+    <ClCompile Include="settings.cpp" />
+    <ClCompile Include="dragdrop.cpp" />
+    <ClCompile Include="hotkeys.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="ScreenShotPlus.rc" />
@@ -138,7 +158,33 @@
     <Image Include="ScreenShotPlus.ico" />
     <Image Include="small.ico" />
   </ItemGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <WarningLevel>Level4</WarningLevel>
+      <PreprocessorDefinitions>_WIN32_WINNT=0x0A00;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>gdiplus.lib;dwmapi.lib;ole32.lib;shell32.lib;uuid.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+    <Manifest>
+      <AdditionalManifestFiles>app.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles>
+    </Manifest>
+  </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
+  <Import Project="$(VcpkgRoot)\scripts\buildsystems\msbuild\vcpkg.targets" Condition="Exists('$(VcpkgRoot)\scripts\buildsystems\msbuild\vcpkg.targets')" />
+  <ItemGroup>
+    <None Include="AGENTS.md" />
+    <None Include="app.manifest" />
+    <None Include="Dependencies.props" />
+    <None Include="vcpkg.json" />
+    <None Include="README.md" />
+    <None Include="THIRD_PARTY_NOTICES.md" />
+    <None Include="VERIFICATION.md" />
+  </ItemGroup>
 </Project>

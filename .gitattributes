@@ -1,0 +1,15 @@
+* text=auto
+*.cpp text eol=lf
+*.h text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.props text eol=lf
+*.vcxproj text eol=lf
+*.filters text eol=lf
+*.manifest text eol=lf
+*.ps1 text eol=lf
+*.rc text eol=lf
+*.sln text eol=crlf
+*.ico binary
+*.png binary
+*.zip binary

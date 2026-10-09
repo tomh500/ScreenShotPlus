@@ -26,8 +26,9 @@ void Button(Gdiplus::Graphics& g, Gdiplus::RectF rect, const std::wstring& text,
     bool primary = false, bool hovered = false);
 void Prepare(Gdiplus::Graphics& g, HWND hwnd);
 void Place(HWND hwnd, int width, int height, bool corner = false, POINT point = {});
+void DpiChanged(HWND hwnd, LPARAM rect, int width, int height);
 void Corners(HWND hwnd);
 std::filesystem::path KnownFolder(REFKNOWNFOLDERID id);
-void OpenFolder(const std::filesystem::path& path);
+bool OpenFolder(const std::filesystem::path& path);
 bool PickFolder(HWND owner, std::filesystem::path& path);
 }

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -19,6 +19,7 @@
     </ProjectConfiguration>
   </ItemGroup>
   <PropertyGroup Label="Globals">
+    <VCPkgLocalAppDataDisabled>true</VCPkgLocalAppDataDisabled>
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
     <ProjectGuid>{64587e9c-56dc-49c4-b1d7-d04d620811b7}</ProjectGuid>
@@ -53,6 +54,7 @@
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <Import Project="Dependencies.props" />
   <ImportGroup Label="ExtensionSettings">
   </ImportGroup>
   <ImportGroup Label="Shared">
@@ -132,6 +134,10 @@
     <ClInclude Include="capture.h" />
     <ClInclude Include="storage.h" />
     <ClInclude Include="preview.h" />
+    <ClInclude Include="config.h" />
+    <ClInclude Include="settings.h" />
+    <ClInclude Include="dragdrop.h" />
+    <ClInclude Include="hotkeys.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="ScreenShotPlus.cpp" />
@@ -140,6 +146,10 @@
     <ClCompile Include="capture.cpp" />
     <ClCompile Include="storage.cpp" />
     <ClCompile Include="preview.cpp" />
+    <ClCompile Include="config.cpp" />
+    <ClCompile Include="settings.cpp" />
+    <ClCompile Include="dragdrop.cpp" />
+    <ClCompile Include="hotkeys.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="ScreenShotPlus.rc" />
@@ -167,4 +177,14 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
+  <Import Project="$(VcpkgRoot)\scripts\buildsystems\msbuild\vcpkg.targets" Condition="Exists('$(VcpkgRoot)\scripts\buildsystems\msbuild\vcpkg.targets')" />
+  <ItemGroup>
+    <None Include="AGENTS.md" />
+    <None Include="app.manifest" />
+    <None Include="Dependencies.props" />
+    <None Include="vcpkg.json" />
+    <None Include="README.md" />
+    <None Include="THIRD_PARTY_NOTICES.md" />
+    <None Include="VERIFICATION.md" />
+  </ItemGroup>
 </Project>

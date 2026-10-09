@@ -22,7 +22,10 @@ Paint::~Paint() {
     }
     EndPaint(window, &ps);
 }
-float Scale(HWND hwnd) { return static_cast<float>(GetDpiForWindow(hwnd)) / 96.0f; }
+float Scale(HWND hwnd) {
+    const auto fitted = reinterpret_cast<UINT_PTR>(GetPropW(hwnd, L"ScreenShotPlus.UiScale"));
+    return fitted ? static_cast<float>(fitted) / 1024.0f : static_cast<float>(GetDpiForWindow(hwnd)) / 96.0f;
+}
 POINT Mouse(HWND hwnd, LPARAM value) {
     const float s = Scale(hwnd);
     return {static_cast<LONG>(GET_X_LPARAM(value) / s), static_cast<LONG>(GET_Y_LPARAM(value) / s)};
@@ -56,19 +59,37 @@ void Prepare(Graphics& g, HWND hwnd) {
     g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
     const auto s = Scale(hwnd); g.ScaleTransform(s, s);
 }
+float FitScale(HWND hwnd, int width, int height, const RECT& work) {
+    const float native = static_cast<float>(GetDpiForWindow(hwnd)) / 96.0f;
+    const float scale = min({native, max(1.0f, static_cast<float>(work.right - work.left - 32)) / width,
+        max(1.0f, static_cast<float>(work.bottom - work.top - 32)) / height});
+    SetPropW(hwnd, L"ScreenShotPlus.UiScale", reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(scale * 1024)));
+    return Scale(hwnd);
+}
 void Place(HWND hwnd, int width, int height, bool corner, POINT point) {
     if (!corner) GetCursorPos(&point);
     MONITORINFO info{sizeof(info)};
     GetMonitorInfoW(MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST), &info);
     SetWindowPos(hwnd, nullptr, info.rcWork.left, info.rcWork.top, 0, 0,
         SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE);
-    const auto s = Scale(hwnd);
+    const auto s = FitScale(hwnd, width, height, info.rcWork);
     const int w = static_cast<int>(width * s), h = static_cast<int>(height * s);
     const int gap = static_cast<int>(20 * s);
     int x = corner ? info.rcWork.right - w - gap : info.rcWork.left + (info.rcWork.right - info.rcWork.left - w) / 2;
     int y = corner ? info.rcWork.bottom - h - gap : info.rcWork.top + (info.rcWork.bottom - info.rcWork.top - h) / 2;
     x = max(static_cast<int>(info.rcWork.left), x); y = max(static_cast<int>(info.rcWork.top), y);
     SetWindowPos(hwnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+void DpiChanged(HWND hwnd, LPARAM value, int width, int height) {
+    const RECT* suggested = reinterpret_cast<const RECT*>(value);
+    MONITORINFO info{sizeof(info)};
+    GetMonitorInfoW(MonitorFromRect(suggested, MONITOR_DEFAULTTONEAREST), &info);
+    const float scale = FitScale(hwnd, width, height, info.rcWork);
+    const int w = static_cast<int>(width * scale), h = static_cast<int>(height * scale);
+    const int x = clamp(static_cast<int>(suggested->left), static_cast<int>(info.rcWork.left), static_cast<int>(info.rcWork.right) - w);
+    const int y = clamp(static_cast<int>(suggested->top), static_cast<int>(info.rcWork.top), static_cast<int>(info.rcWork.bottom) - h);
+    SetWindowPos(hwnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    InvalidateRect(hwnd, nullptr, FALSE);
 }
 void Corners(HWND hwnd) {
     const DWORD rounded = 2; DwmSetWindowAttribute(hwnd, 33, &rounded, sizeof(rounded));
@@ -78,9 +99,10 @@ filesystem::path KnownFolder(REFKNOWNFOLDERID id) {
     if (FAILED(SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, nullptr, &value))) return {};
     filesystem::path path(value); CoTaskMemFree(value); return path;
 }
-void OpenFolder(const filesystem::path& path) {
+bool OpenFolder(const filesystem::path& path) {
     error_code ec; filesystem::create_directories(path, ec);
-    if (!ec) ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    if (ec) return false;
+    return reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) > 32;
 }
 bool PickFolder(HWND owner, filesystem::path& path) {
     IFileOpenDialog* dialog = nullptr;

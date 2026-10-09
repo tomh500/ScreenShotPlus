@@ -71,9 +71,7 @@ LRESULT CALLBACK PreviewProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
         return 0;
     }
     case WM_DPICHANGED: {
-        const RECT* r = reinterpret_cast<RECT*>(lparam);
-        SetWindowPos(hwnd, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
-        InvalidateRect(hwnd, nullptr, FALSE); return 0;
+        ui::DpiChanged(hwnd, lparam, 320, 294); return 0;
     }
     }
     return DefWindowProcW(hwnd, msg, wparam, lparam);
@@ -83,7 +81,8 @@ bool InitPreview(HINSTANCE instance, function<void()> drag) {
     WNDCLASSEXW cls{sizeof(cls)};
     cls.hInstance = instance; cls.lpfnWndProc = PreviewProc; cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     cls.lpszClassName = L"ScreenShotPlus.Preview";
-    if (!RegisterClassExW(&cls)) return false;
+    WNDCLASSEXW existing{sizeof(existing)};
+    if (!GetClassInfoExW(instance, cls.lpszClassName, &existing) && !RegisterClassExW(&cls)) return false;
     preview.window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
         cls.lpszClassName, L"ScreenShotPlus 最新截图", WS_POPUP, 0, 0, 320, 294, nullptr, nullptr, instance, nullptr);
     preview.drag = move(drag);

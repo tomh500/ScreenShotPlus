@@ -80,6 +80,17 @@ void Place(HWND hwnd, int width, int height, bool corner, POINT point) {
     x = max(static_cast<int>(info.rcWork.left), x); y = max(static_cast<int>(info.rcWork.top), y);
     SetWindowPos(hwnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
 }
+void PlaceAt(HWND hwnd, int x, int y, int width, int height, POINT anchor) {
+    MONITORINFO info{sizeof(info)};
+    GetMonitorInfoW(MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST), &info);
+    const auto s = FitScale(hwnd, width, height, info.rcWork);
+    const int w = static_cast<int>(width * s), h = static_cast<int>(height * s);
+    const int left = clamp(x, static_cast<int>(info.rcWork.left), max(static_cast<int>(info.rcWork.left),
+        static_cast<int>(info.rcWork.right) - w));
+    const int top = clamp(y, static_cast<int>(info.rcWork.top), max(static_cast<int>(info.rcWork.top),
+        static_cast<int>(info.rcWork.bottom) - h));
+    SetWindowPos(hwnd, nullptr, left, top, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+}
 void DpiChanged(HWND hwnd, LPARAM value, int width, int height) {
     const RECT* suggested = reinterpret_cast<const RECT*>(value);
     MONITORINFO info{sizeof(info)};

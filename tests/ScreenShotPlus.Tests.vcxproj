@@ -39,7 +39,7 @@
     <ClCompile Include="tests.cpp" /><ClCompile Include="..\ui.cpp" /><ClCompile Include="..\config.cpp" />
     <ClCompile Include="..\storage.cpp" /><ClCompile Include="..\dragdrop.cpp" /><ClCompile Include="..\capture.cpp" />
     <ClCompile Include="..\preview.cpp" /><ClCompile Include="..\settings.cpp" /><ClCompile Include="..\app.cpp" /><ClCompile Include="..\hotkeys.cpp" />
-    <ClCompile Include="..\startup.cpp" />
+    <ClCompile Include="..\startup.cpp" /><ClCompile Include="..\editor.cpp" />
     <ResourceCompile Include="..\ScreenShotPlus.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

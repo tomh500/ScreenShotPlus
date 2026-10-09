@@ -8,6 +8,7 @@
 #include "ui.h"
 #include "hotkeys.h"
 #include "startup.h"
+#include "editor.h"
 #include <nlohmann/json.hpp>
 #include <atomic>
 #include <iostream>
@@ -200,6 +201,201 @@ void StartupRegistration(const filesystem::path& root) {
     WriteRunValue(original);
 }
 }
+namespace {
+Bitmap* MakeBitmap(int width, int height, Color color) {
+    Bitmap* image = new Bitmap(width, height, PixelFormat32bppRGB);
+    Graphics g(image);
+    g.Clear(color);
+    return image;
+}
+// 在半径为 radius 的邻域里找一个与期望颜色相符的像素，用于容忍抗锯齿边缘。
+bool AnyPixelNear(Bitmap& image, int x, int y, int radius, Color expected) {
+    for (int dy = -radius; dy <= radius; ++dy)
+        for (int dx = -radius; dx <= radius; ++dx) {
+            const int px = x + dx, py = y + dy;
+            if (px < 0 || py < 0 || px >= static_cast<int>(image.GetWidth()) || py >= static_cast<int>(image.GetHeight()))
+                continue;
+            Color actual;
+            if (image.GetPixel(px, py, &actual) == Ok && actual.GetR() == expected.GetR() &&
+                actual.GetG() == expected.GetG() && actual.GetB() == expected.GetB()) return true;
+        }
+    return false;
+}
+bool SamePixel(Bitmap& image, int x, int y, Color expected) {
+    Color actual;
+    return image.GetPixel(x, y, &actual) == Ok && actual.GetR() == expected.GetR() &&
+        actual.GetG() == expected.GetG() && actual.GetB() == expected.GetB();
+}
+// 标注必须只影响被绘制的像素，且落点与画笔颜色在导出后的 PNG 中保持一致。
+void EditorAnnotation(const filesystem::path& root) {
+    const Color background(255, 240, 240, 240);
+    unique_ptr<Bitmap> base(MakeBitmap(120, 80, background));
+    Check(base && base->GetLastStatus() == Ok, "editor base image");
+    // 预设颜色：赤橙黄绿青蓝紫齐全，且每个都不相同。
+    set<ARGB> presets;
+    for (int i = 0; i < editor::kPresetCount; ++i) presets.insert(editor::PresetColor(i).GetValue());
+    Check(static_cast<int>(presets.size()) == editor::kPresetCount, "preset colors are distinct");
+    Check(editor::PresetColor(0).GetR() > 200 && editor::PresetColor(0).GetG() < 100, "first preset is red");
+    Check(editor::PresetColor(2).GetR() > 200 && editor::PresetColor(2).GetG() > 150 &&
+        editor::PresetColor(2).GetB() < 120, "third preset is yellow");
+    Check(editor::PresetColor(6).GetB() > 130 && editor::PresetColor(6).GetR() > 90, "seventh preset is purple");
+    // 画笔：一段折线，颜色与线宽都由标注自身决定。
+    editor::Shape stroke;
+    stroke.tool = editor::Tool::Brush;
+    stroke.color = editor::PresetColor(5);
+    stroke.stroke = 8;
+    for (int x = 10; x <= 90; x += 4) stroke.points.push_back(PointF(static_cast<REAL>(x), 40.0f));
+    // 文字：字号与颜色独立于画笔。
+    editor::Shape label;
+    label.tool = editor::Tool::Text;
+    label.color = editor::PresetColor(0);
+    label.size = 24;
+    label.at = PointF(10.0f, 8.0f);
+    label.text = L"标注";
+    Check(editor::DefaultStrokeWidth(*base) >= 3, "default stroke width scales with the image");
+    Check(editor::DefaultFontSize(*base) >= 20, "default font size scales with the image");
+    Check(editor::NextStrokeWidth(3) > 3 && editor::NextStrokeWidth(18) == 3, "stroke width cycles");
+    Check(editor::NextFontSize(30, 1) > 30 && editor::NextFontSize(30, -1) < 30, "font size steps up and down");
+    Check(editor::NextFontSize(16, -1) == 16 && editor::NextFontSize(128, 1) == 128, "font size stays in range");
+
+    unique_ptr<Bitmap> flattened(MakeBitmap(120, 80, Color(255, 0, 0, 0)));
+    Check(editor::Flatten(*base, {stroke, label}, *flattened), "flatten annotations");
+    Color middle;
+    Check(AnyPixelNear(*flattened, 50, 40, 6, editor::PresetColor(5)), "brush stroke keeps the selected color");
+    Check(SamePixel(*flattened, 5, 70, background), "untouched pixels keep the original image");
+    Check(AnyPixelNear(*flattened, 18, 18, 10, editor::PresetColor(0)), "text is drawn in the text color");
+    // 擦除笔用背景色覆盖，等价于把画笔换成不绘制。
+    editor::Shape erase = stroke;
+    erase.color = Color(255, 240, 240, 240);
+    unique_ptr<Bitmap> erased(MakeBitmap(120, 80, Color(255, 0, 0, 0)));
+    Check(editor::Flatten(*base, {erase}, *erased) && AnyPixelNear(*erased, 50, 40, 6, background), "eraser restores the background");
+    // 空标注列表必须原样复制。
+    unique_ptr<Bitmap> plain(MakeBitmap(120, 80, Color(255, 0, 0, 0)));
+    Check(editor::Flatten(*base, {}, *plain) && SamePixel(*plain, 5, 70, background) &&
+        SamePixel(*plain, 50, 50, background), "empty annotation list copies the source");
+    // 尺寸不一致的目标位图必须被拒绝，避免越界绘制。
+    unique_ptr<Bitmap> wrong(MakeBitmap(60, 40, background));
+    Check(!editor::Flatten(*base, {stroke}, *wrong), "mismatched target size rejected");
+
+    // 写回原路径：内容替换，且不留下临时文件。
+    const auto folder = root / L"标注 中文" / L"editor";
+    filesystem::create_directories(folder);
+    filesystem::path file;
+    wstring error;
+    Check(SavePng(*base, folder, file, error), "save annotation source");
+    unique_ptr<Bitmap> baked(MakeBitmap(120, 80, Color(255, 0, 0, 0)));
+    Check(editor::Flatten(*base, {stroke}, *baked) && ReplacePng(*baked, file, error), "write annotations back");
+    {
+        Bitmap reloaded(file.c_str());
+        Check(reloaded.GetLastStatus() == Ok && AnyPixelNear(reloaded, 50, 40, 6, editor::PresetColor(5)),
+            "annotated PNG persisted in place");
+    }
+    size_t temporary = 0;
+    for (const auto& item : filesystem::directory_iterator(folder)) if (item.path().extension() == L".tmp") ++temporary;
+    Check(temporary == 0, "no temporary file is left behind");
+    // 空路径必须被拒绝，而不是写到当前目录。
+    Check(!ReplacePng(*baked, {}, error) && !error.empty(), "empty annotation target rejected");
+}
+// 编辑窗口的交互：画笔落点必须映射回图片像素，保存后原文件被替换。
+void EditorInteraction(HINSTANCE instance, const filesystem::path& root) {
+    const Color background(255, 240, 240, 240);
+    unique_ptr<Bitmap> base(MakeBitmap(80, 60, background));
+    const auto folder = root / L"编辑交互";
+    filesystem::create_directories(folder);
+    filesystem::path file;
+    wstring error;
+    Check(SavePng(*base, folder, file, error), "editor interaction source");
+    Bitmap* finished = nullptr;
+    Check(editor::InitEditor(instance, nullptr, [&](Bitmap* done, const filesystem::path&) {
+        finished = done;
+    }), "editor initialization");
+    editor::OpenEditor(*base, file);
+    HWND window = FindWindowW(L"ScreenShotPlus.Editor", nullptr);
+    Check(window && editor::EditorVisible(), "editor window opens");
+    Bitmap* canvas = editor::Canvas();
+    Check(canvas && canvas->GetWidth() == 80 && canvas->GetHeight() == 60, "editor loads the screenshot copy");
+    UpdateWindow(window); Pump(120);
+    // 画布在窗口中的位置由编辑器自己报告，测试据此把图片像素换算成客户区坐标。
+    const RectF canvasRect = editor::CanvasRect();
+    const float scale = ui::Scale(window);
+    const float imageScale = canvasRect.Width / 80.0f;
+    Check(canvasRect.Width > 0 && imageScale > 0, "editor reports a usable canvas rectangle");
+    const auto toClient = [&](float imageX, float imageY) {
+        return POINT{static_cast<LONG>((canvasRect.X + imageX * imageScale) * scale),
+            static_cast<LONG>((canvasRect.Y + imageY * imageScale) * scale)};
+    };
+    // 在图片坐标 (20,30) 附近画一笔，落点必须精确回到同一像素。
+    const POINT from = toClient(20, 30), to = toClient(60, 30);
+    SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(from.x, from.y));
+    SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM((from.x + to.x) / 2, from.y));
+    SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(to.x, to.y));
+    SendMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(to.x, to.y));
+    // 工具栏命中：默认选中第一个预设颜色，点击第二个色块后画笔应换成橙色。
+    const RectF swatch = editor::SwatchRect(1);
+    const POINT swatchPoint{static_cast<LONG>((swatch.X + swatch.Width / 2) * scale),
+        static_cast<LONG>((swatch.Y + swatch.Height / 2) * scale)};
+    SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(swatchPoint.x, swatchPoint.y));
+    SendMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(swatchPoint.x, swatchPoint.y));
+    Check(editor::SelectedColorIndex() == 1, "preset swatch selects the brush color");
+    Check(editor::ShapeCount() == 1, "brush stroke recorded once");
+    editor::UndoLastShape();
+    Check(editor::ShapeCount() == 0, "undo removes the last annotation");
+    editor::RedoLastShape();
+    Check(editor::ShapeCount() == 1, "redo restores the annotation");
+    // 保存：写回原文件，并把成品交回调用方。
+    editor::RequestSave();
+    Check(!editor::EditorVisible(), "editor closes after saving");
+    Check(finished != nullptr, "editor hands the flattened image back");
+    {
+        Bitmap reloaded(file.c_str());
+        const Color expected = editor::PresetColor(0);
+        Check(reloaded.GetLastStatus() == Ok && AnyPixelNear(reloaded, 40, 30, 4, expected),
+            "saved file contains the annotation at the expected pixel");
+    }
+    unique_ptr<Bitmap> handed(finished);
+    Check(handed && handed->GetWidth() == 80, "flattened image keeps the source size");
+    editor::DestroyEditor();
+    Check(!editor::EditorVisible(), "editor destroyed");
+    // 取消路径：不写文件，并把空结果交回调用方。
+    finished = nullptr;
+    Check(editor::InitEditor(instance, nullptr, [&](Bitmap* done, const filesystem::path&) { finished = done; }),
+        "editor reinitialization");
+    editor::OpenEditor(*base, file);
+    window = FindWindowW(L"ScreenShotPlus.Editor", nullptr);
+    UpdateWindow(window); Pump(120);
+    SendMessageW(window, WM_KEYDOWN, VK_ESCAPE, 0);
+    Check(!editor::EditorVisible() && finished == nullptr, "Escape cancels without writing the file");
+    editor::DestroyEditor();
+}
+// 预览图片的单击必须进入标注编辑，拖动则仍然是文件分享。
+void EditorEntry(HINSTANCE instance, const filesystem::path& root) {
+    unique_ptr<Bitmap> base(MakeBitmap(60, 40, Color(255, 30, 136, 229)));
+    const auto folder = root / L"标注入口";
+    filesystem::create_directories(folder);
+    filesystem::path file;
+    wstring error;
+    Check(SavePng(*base, folder, file, error), "editor entry source");
+    bool edited = false;
+    Check(editor::InitEditor(instance, nullptr, [](Bitmap* image, const filesystem::path&) { delete image; }),
+        "editor entry initialization");
+    Check(InitPreview(instance, [] {}, [&] { edited = true; }), "preview with edit hook");
+    ShowPreview(base.get(), file, POINT{400, 300}, 0);
+    HWND preview = FindWindowW(L"ScreenShotPlus.Preview", nullptr);
+    Check(preview != nullptr && PreviewVisible(), "preview shown for the edit hook");
+    const float scale = ui::Scale(preview);
+    // 单击图片区域（未越过拖拽阈值）应触发编辑回调。
+    SendMessageW(preview, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(static_cast<int>(100 * scale), static_cast<int>(100 * scale)));
+    SendMessageW(preview, WM_LBUTTONUP, 0, MAKELPARAM(static_cast<int>(100 * scale), static_cast<int>(100 * scale)));
+    Check(edited, "single click on the preview opens the annotation editor");
+    edited = false;
+    // 按下并越过阈值是拖动，不应进入编辑。
+    SendMessageW(preview, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(static_cast<int>(100 * scale), static_cast<int>(100 * scale)));
+    SendMessageW(preview, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(static_cast<int>(160 * scale), static_cast<int>(100 * scale)));
+    SendMessageW(preview, WM_LBUTTONUP, 0, MAKELPARAM(static_cast<int>(160 * scale), static_cast<int>(100 * scale)));
+    Check(!edited, "drag on the preview does not open the editor");
+    DestroyPreview(); editor::DestroyEditor();
+}
+}
 filesystem::path PngStorage(const filesystem::path& root) {
     Bitmap image(17, 23, PixelFormat32bppRGB);
     { Graphics g(&image); g.Clear(Color(255, 13, 101, 203)); }
@@ -342,7 +538,7 @@ void CaptureAndPreview(HINSTANCE instance, const filesystem::path& root) {
     bool dragged = false;
     Check(InitPreview(instance, [&] {
         dragged = true; Pump(1300); Check(PreviewVisible(), "timer paused during drag callback");
-    }), "preview initialization");
+    }, [] {}), "preview initialization");
     const HWND foreground = GetForegroundWindow();
     ShowPreview(result.get(), file, finished, 0);
     Check(PreviewVisible() && GetForegroundWindow() == foreground, "preview does not activate");
@@ -543,6 +739,9 @@ int wmain(int argc, wchar_t** argv) {
         Configuration(root); cout << "PASS config round trip / corrupt and unwritable paths\n";
         StartupRegistration(root); cout << "PASS startup registration / config sync / hotkey rollback / restore\n";
         const auto file = PngStorage(root); cout << "PASS PNG pixels / Unicode paths / unique saves\n";
+        EditorAnnotation(root); cout << "PASS annotation flatten / colors / text / in-place write back\n";
+        EditorInteraction(GetModuleHandleW(nullptr), root); cout << "PASS editor canvas mapping / swatch / undo / save / cancel\n";
+        EditorEntry(GetModuleHandleW(nullptr), root); cout << "PASS preview click opens editor / drag still drags\n";
         FileTransfer(file); cout << "PASS Unicode file transfer / copy-only format\n";
         WritePermissions(root); cout << "PASS real ACL write denial / original config preserved / permissions restored\n";
         if (liveUi) {

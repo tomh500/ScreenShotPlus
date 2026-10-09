@@ -8,6 +8,7 @@
 #include "settings.h"
 #include "dragdrop.h"
 #include "hotkeys.h"
+#include "editor.h"
 using namespace std;
 using namespace Gdiplus;
 namespace {
@@ -58,7 +59,7 @@ void SavePending() {
     ShowWindow(app.panel, SW_HIDE); LatestPreview();
 }
 void StartCapture() {
-    if (app.phase != App::Idle || SettingsVisible() || app.exiting) return;
+    if (app.phase != App::Idle || SettingsVisible() || editor::EditorVisible() || app.exiting) return;
     app.restorePreview = PreviewVisible();
     ShowWindow(app.panel, SW_HIDE); HidePreview(); DwmFlush();
     app.phase = App::Selecting;
@@ -79,7 +80,7 @@ void StartCapture() {
     }
 }
 void DragLatest() {
-    if (app.phase != App::Idle || !app.latest || SettingsVisible()) return;
+    if (app.phase != App::Idle || !app.latest || SettingsVisible() || editor::EditorVisible()) return;
     app.phase = App::Dragging;
     DWORD effect = DROPEFFECT_NONE;
     const HRESULT result = DragFile(app.latestFile, effect);
@@ -89,6 +90,32 @@ void DragLatest() {
         app.notice = result == DRAGDROP_S_DROP && effect == DROPEFFECT_COPY ? L"文件已拖出，原截图仍保留。" : L"拖放已取消，原截图仍保留。";
         InvalidateRect(app.panel, nullptr, FALSE);
     }
+}
+void EditLatest() {
+    if (app.phase != App::Idle || !app.latest || SettingsVisible() || editor::EditorVisible()) return;
+    HidePreview();
+    // 编辑器持有自己的副本，编辑期间的绘制不会影响这张已经保存的截图。
+    editor::OpenEditor(*app.latest, app.latestFile);
+    if (!editor::EditorVisible()) {
+        app.notice = L"无法打开标注编辑器，请重试。";
+        LatestPreview();
+        return;
+    }
+    app.notice = L"标注完成后点击保存，编辑结果会写回原截图文件。";
+    InvalidateRect(app.panel, nullptr, FALSE);
+}
+void EditedImage(unique_ptr<Bitmap> image) {
+    app.phase = App::Idle;
+    if (!image) {
+        // 取消：原截图与预览都保持不变。
+        app.notice = L"已取消标注，原截图保持不变。";
+        if (app.latest) LatestPreview();
+        return;
+    }
+    app.latest = move(image);
+    app.notice = L"标注已写回原截图文件，可直接拖动分享。";
+    ShowWindow(app.panel, SW_HIDE);
+    LatestPreview();
 }
 bool ApplyConfig(const Config& next, wstring& error) {
     if (!ApplyConfiguredSettings(app.panel, app.hotkeys, app.config, next, app.configFile, error)) return false;
@@ -178,7 +205,8 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
         app.exiting = true; CancelSelection();
         Shell_NotifyIconW(NIM_DELETE, &app.tray);
         ReleaseHotkeys(hwnd, app.hotkeys);
-        DestroySettings(); DestroyPreview(); app.latest.reset(); app.pending.reset(); PostQuitMessage(0); return 0;
+        DestroySettings(); DestroyPreview(); editor::DestroyEditor();
+        app.latest.reset(); app.pending.reset(); PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(hwnd, message, wparam, lparam);
 }
@@ -197,7 +225,11 @@ int RunApp(HINSTANCE instance, bool startup, const filesystem::path& configFile)
     app.panel = CreateWindowExW(WS_EX_TOOLWINDOW, PANEL_CLASS, L"ScreenShotPlus", WS_POPUP,
         0, 0, 420, 520, nullptr, nullptr, instance, nullptr);
     if (!app.panel) return 5;
-    if (!InitPreview(instance, DragLatest) || !InitSettings(instance, app.panel, ApplyConfig)) {
+    if (!InitPreview(instance, DragLatest, EditLatest) ||
+        !InitSettings(instance, app.panel, ApplyConfig) ||
+        !editor::InitEditor(instance, app.panel, [](Bitmap* image, const filesystem::path&) {
+            EditedImage(unique_ptr<Bitmap>(image));
+        })) {
         DestroyWindow(app.panel); return 7;
     }
     ui::Corners(app.panel);

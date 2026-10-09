@@ -26,13 +26,21 @@ struct TestStartupKey {
     wstring key = L"Software\\ScreenShotPlus.Tests-" + to_wstring(GetCurrentProcessId()) + L"-" + to_wstring(GetTickCount64());
     ~TestStartupKey() { RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str()); }
 };
+struct SelectionGuard { ~SelectionGuard() { CancelSelection(); } };
 void Check(bool condition, const char* message) { if (!condition) throw runtime_error(message); }
 void Pump(unsigned milliseconds) {
     const auto end = GetTickCount64() + milliseconds;
     while (GetTickCount64() < end) {
         MSG message{};
-        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&message); DispatchMessageW(&message); }
-        MsgWaitForMultipleObjectsEx(0, nullptr, 20, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&message); DispatchMessageW(&message);
+            // A continuously animated high-refresh window may enqueue another
+            // frame before the queue is empty. Preserve the requested sample
+            // time instead of draining that queue until the whole tween ends.
+            if (GetTickCount64() >= end) return;
+        }
+        const auto now = GetTickCount64(); if (now >= end) return;
+        MsgWaitForMultipleObjectsEx(0, nullptr, static_cast<DWORD>(min<ULONGLONG>(20, end - now)), QS_ALLINPUT, MWMO_INPUTAVAILABLE);
     }
 }
 void Click(HWND window, int x, int y) {
@@ -65,8 +73,10 @@ void Snapshot(HWND hwnd, const filesystem::path& folder, bool settle = true) {
     HDC dc = GetDC(hwnd), memory = CreateCompatibleDC(dc);
     HBITMAP bitmap = CreateCompatibleBitmap(dc, rect.right, rect.bottom);
     HGDIOBJ old = SelectObject(memory, bitmap);
-    const bool copied = SendMessageTimeoutW(hwnd, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(memory), PRF_CLIENT,
-        SMTO_ABORTIFHUNG, 2000, nullptr) != 0;
+    DWORD process = 0; GetWindowThreadProcessId(hwnd, &process);
+    const bool copied = process == GetCurrentProcessId() ?
+        SendMessageTimeoutW(hwnd, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(memory), PRF_CLIENT, SMTO_ABORTIFHUNG, 2000, nullptr) != 0 :
+        PrintWindow(hwnd, memory, PW_CLIENTONLY) != FALSE;
     SelectObject(memory, old); DeleteDC(memory); ReleaseDC(hwnd, dc);
     bool saved = false;
     if (copied) {
@@ -76,6 +86,46 @@ void Snapshot(HWND hwnd, const filesystem::path& folder, bool settle = true) {
     }
     DeleteObject(bitmap);
     Check(saved, "UI snapshot failed");
+}
+COLORREF PrintedPixel(HWND hwnd, int x, int y) {
+    RECT rect{}; GetClientRect(hwnd, &rect);
+    HDC dc = GetDC(hwnd), memory = CreateCompatibleDC(dc);
+    HBITMAP bitmap = CreateCompatibleBitmap(dc, rect.right, rect.bottom);
+    HGDIOBJ old = bitmap && memory ? SelectObject(memory, bitmap) : nullptr;
+    const bool copied = old && old != HGDI_ERROR && SendMessageTimeoutW(hwnd, WM_PRINTCLIENT,
+        reinterpret_cast<WPARAM>(memory), PRF_CLIENT, SMTO_ABORTIFHUNG, 2000, nullptr) != 0;
+    const auto pixel = copied ? GetPixel(memory, x, y) : CLR_INVALID;
+    if (old && old != HGDI_ERROR) SelectObject(memory, old);
+    if (bitmap) DeleteObject(bitmap);
+    if (memory) DeleteDC(memory);
+    if (dc) ReleaseDC(hwnd, dc);
+    Check(pixel != CLR_INVALID, "read rendered UI fixture pixel");
+    return pixel;
+}
+unique_ptr<Bitmap> NativePixels(HWND hwnd, RECT band) {
+    DWORD process = 0; GetWindowThreadProcessId(hwnd, &process);
+    Check(process == GetCurrentProcessId(), "native pixel read is restricted to our own UI fixture");
+    const int width = band.right - band.left, height = band.bottom - band.top;
+    HDC dc = GetDC(hwnd), memory = CreateCompatibleDC(dc);
+    HBITMAP bitmap = CreateCompatibleBitmap(dc, width, height);
+    HGDIOBJ old = bitmap && memory ? SelectObject(memory, bitmap) : nullptr;
+    GdiFlush();
+    const bool copied = old && old != HGDI_ERROR && BitBlt(memory, 0, 0, width, height, dc, band.left, band.top, SRCCOPY) != FALSE;
+    if (old && old != HGDI_ERROR) SelectObject(memory, old);
+    if (memory) DeleteDC(memory);
+    if (dc) ReleaseDC(hwnd, dc);
+    unique_ptr<Bitmap> pixels(copied ? Bitmap::FromHBITMAP(bitmap, nullptr) : nullptr);
+    if (bitmap) DeleteObject(bitmap);
+    Check(pixels && pixels->GetLastStatus() == Ok, "read native painted pixels without forcing WM_PRINTCLIENT repaint");
+    return pixels;
+}
+uint64_t PixelHash(Bitmap& image) {
+    uint64_t result = 1469598103934665603ULL;
+    for (UINT y = 0; y < image.GetHeight(); ++y) for (UINT x = 0; x < image.GetWidth(); ++x) {
+        Color color; Check(image.GetPixel(x, y, &color) == Ok, "hash native fixture pixel");
+        result = (result ^ color.GetValue()) * 1099511628211ULL;
+    }
+    return result;
 }
 void AnimationTiming() {
     Check(abs(ui::RefreshRateValue(60000, 1001) - 59.94005994) < 0.00001, "fractional display refresh rate preserved");
@@ -107,6 +157,23 @@ void AnimationTiming() {
         peak = max(peak, value);
     }
     Check(peak > 1.01f, "spring has a restrained settling rebound");
+    const array<float, 5> strengths{0, 0.4f, 0.75f, 1, 1.3f};
+    double previousDuration = 0;
+    for (unsigned level = 0; level < strengths.size(); ++level) {
+        ui::SetMotionOptions(level, 1);
+        Check(ui::MotionLevel() == level && abs(ui::MotionAmount() - strengths[level]) < 0.001f,
+            "five tiers expose distinct restrained-to-ultimate motion strength");
+        const double duration = ui::MotionDuration(0.2);
+        Check(isfinite(duration) && duration > previousDuration, "higher motion tiers allow progressively longer settling");
+        previousDuration = duration;
+    }
+    ui::SetMotionOptions(0, 1);
+    Check(!ui::DecorativeMotion() && ui::MotionAmount() == 0, "light tier disables ordinary decorative motion");
+    ui::SetMotionOptions(2, 0); const double quick = ui::MotionDuration(0.2);
+    ui::SetMotionOptions(2, 1); const double normal = ui::MotionDuration(0.2);
+    ui::SetMotionOptions(2, 2); const double relaxed = ui::MotionDuration(0.2);
+    Check(quick < normal && normal < relaxed && quick > 0, "three speed settings retain time-based positive duration");
+    ui::SetMotionOptions(2, 1);
 }
 struct MotionFixture { bool hovered = false, enabled = false; };
 LRESULT CALLBACK MotionFixtureProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -359,18 +426,66 @@ void Configuration(const filesystem::path& root) {
     const auto file = root / L"设置" / L"config.json";
     Config c = DefaultConfig(); c.folder = root / L"截图 中文 空格";
     c.modifiers = MOD_CONTROL | MOD_ALT; c.key = VK_F9; c.printScreen = true; c.previewSeconds = 15; c.startup = true;
+    Check(c.animationLevel == 2 && c.animationSpeed == 1 && c.accentColor == 0 && c.previewCorner == 0 &&
+        c.previewSize == 1 && c.captureShade == 60 && c.captureAnimation && c.dragAnimation &&
+        c.startupAnimation && c.captureGuides, "new customization defaults preserve existing behavior");
+    c.animationLevel = 4; c.animationSpeed = 2; c.accentColor = 3; c.previewCorner = 2;
+    c.previewSize = 0; c.captureShade = 75;
+    c.captureAnimation = false; c.dragAnimation = false; c.startupAnimation = false; c.captureGuides = false;
     wstring error;
     Check(SaveConfig(file, c, error), "save config");
     wstring warning;
     auto loaded = LoadConfig(file, warning);
     Check(warning.empty() && loaded.folder == c.folder && loaded.key == VK_F9 && loaded.previewSeconds == 15 && loaded.printScreen && loaded.startup, "Unicode config round trip");
+    Check(loaded.animationLevel == 4 && loaded.animationSpeed == 2 && loaded.accentColor == 3 &&
+        loaded.previewCorner == 2 && loaded.previewSize == 0 && loaded.captureShade == 75 &&
+        !loaded.captureAnimation && !loaded.dragAnimation && !loaded.startupAnimation && !loaded.captureGuides,
+        "animation, color, preview and capture preferences persist");
     c.previewSeconds = 0; Check(SaveConfig(file, c, error), "replace existing config atomically");
     Check(LoadConfig(file, warning).previewSeconds == 0, "updated config persisted");
     nlohmann::json data;
     { ifstream in(file); in >> data; }
-    auto legacy = data; legacy.erase("startup");
+    auto legacy = data;
+    for (const auto* key : {"startup", "animationLevel", "animationSpeed", "accentColor", "previewCorner", "previewSize",
+        "captureShade", "captureAnimation", "dragAnimation", "startupAnimation", "captureGuides"}) legacy.erase(key);
     { ofstream out(file); out << legacy; }
-    Check(!LoadConfig(file, warning).startup && warning.empty(), "legacy config defaults startup off");
+    warning.clear(); loaded = LoadConfig(file, warning);
+    Check(!loaded.startup && warning.empty() && loaded.animationLevel == 2 && loaded.animationSpeed == 1 &&
+        loaded.accentColor == 0 && loaded.previewCorner == 0 && loaded.previewSize == 1 && loaded.captureShade == 60 &&
+        loaded.captureAnimation && loaded.dragAnimation && loaded.startupAnimation && loaded.captureGuides,
+        "legacy config loads safe customization defaults without migration");
+    for (unsigned level = 0; level < 5; ++level) {
+        c.animationLevel = level;
+        c.animationSpeed = level % 3; c.accentColor = level;
+        c.previewCorner = level % 4; c.previewSize = level % 3; c.captureShade = level == 0 ? 25 : 80;
+        Check(SaveConfig(file, c, error), "save each animation tier including range endpoints");
+        warning.clear(); loaded = LoadConfig(file, warning);
+        Check(warning.empty() && loaded.animationLevel == c.animationLevel && loaded.animationSpeed == c.animationSpeed &&
+            loaded.accentColor == c.accentColor && loaded.previewCorner == c.previewCorner && loaded.previewSize == c.previewSize &&
+            loaded.captureShade == c.captureShade, "all animation tiers and customization endpoints round trip");
+    }
+    const array<pair<const char*, int>, 6> limits{{{"animationLevel", 4}, {"animationSpeed", 2}, {"accentColor", 4},
+        {"previewCorner", 3}, {"previewSize", 2}, {"captureShade", 80}}};
+    for (const auto& [key, maximum] : limits) {
+        for (const auto& bad : {nlohmann::json(-1), nlohmann::json(maximum + 1), nlohmann::json(1.5),
+            nlohmann::json("bad"), nlohmann::json(true), nlohmann::json(18446744073709551615ULL)}) {
+            auto invalid = data; invalid[key] = bad;
+            { ofstream out(file); out << invalid; }
+            warning.clear(); loaded = LoadConfig(file, warning);
+            Check(!warning.empty() && loaded.animationLevel == 2 && loaded.key == 'S',
+                "malformed customization values cannot wrap or partially replace configuration");
+        }
+    }
+    { auto invalid = data; invalid["captureShade"] = 24; ofstream out(file); out << invalid; }
+    warning.clear(); loaded = LoadConfig(file, warning);
+    Check(!warning.empty() && loaded.captureShade == 60, "capture shade lower bound validated");
+    for (const auto* key : {"captureAnimation", "dragAnimation", "startupAnimation", "captureGuides"}) {
+        auto invalid = data; invalid[key] = 1;
+        { ofstream out(file); out << invalid; }
+        warning.clear(); loaded = LoadConfig(file, warning);
+        Check(!warning.empty() && loaded.captureAnimation && loaded.dragAnimation && loaded.startupAnimation && loaded.captureGuides,
+            "animation switches require boolean configuration values");
+    }
     for (const auto& bad : {nlohmann::json(-1), nlohmann::json(4000), nlohmann::json(2.5), nlohmann::json("bad")}) {
         auto invalid = data; invalid["previewSeconds"] = bad;
         { ofstream out(file); out << invalid; }
@@ -545,6 +660,115 @@ void SettingsFailureUi(HINSTANCE instance, const filesystem::path& root) {
     Check(SettingsVisible(), "save failure keeps settings available");
     Snapshot(hwnd, root / L"settings-error-ui"); DestroySettings();
 }
+void SettingsMotionUi(HINSTANCE instance, const filesystem::path& root) {
+    struct RestoreOptions {
+        ~RestoreOptions() { DestroySettings(); ui::SetMotionOptions(2, 1); ui::SetAccent(0); }
+    } restore;
+    const auto file = root / L"settings-customization" / L"config.json";
+    Config initial = DefaultConfig(); initial.folder = root / L"settings-customization-images";
+    wstring error, warning; Check(SaveConfig(file, initial, error), "persist settings fixture baseline");
+    unsigned applied = 0;
+    Check(InitSettings(instance, nullptr, [&](const Config& config, wstring& failure) {
+        const bool saved = SaveConfig(file, config, failure); if (saved) ++applied; return saved;
+    }), "initialize settings motion fixture");
+    SetSettingsConfigFile(file); ShowSettings(initial);
+    HWND hwnd = OwnWindow(L"ScreenShotPlus.Settings"); Check(hwnd && SettingsVisible(), "settings fixture visible");
+    UpdateWindow(hwnd); Pump(350);
+    Click(hwnd, 190, 92); UpdateWindow(hwnd); Pump(260);
+    Check(GetSettingsState().tab == 1 && GetSettingsState().title == L"高", "motion tab begins at persisted high tier");
+    Click(hwnd, 62, 289); UpdateWindow(hwnd);
+    Check(GetSettingsState().working.animationLevel == 0 && ui::MotionLevel() == 0 && !ui::GetMotionInfo(hwnd).enabled,
+        "light tier applies immediately to ordinary motion");
+    const auto frames = ui::GetMotionInfo(hwnd).frames;
+    const auto lightSampleStart = GetTickCount64();
+    Pump(35);
+    auto state = GetSettingsState();
+    cout << "Light selector sample: elapsed " << GetTickCount64() - lightSampleStart << " ms, frames " << frames << " -> "
+        << ui::GetMotionInfo(hwnd).frames << ", position " << state.sliderPosition << ", running " << ui::GetMotionInfo(hwnd).running << '\n';
+    Check(ui::GetMotionInfo(hwnd).frames > frames && state.sliderPosition > 0 && state.sliderPosition < 2,
+        "selector thumb still animates smoothly while light tier disables other animation");
+    Pump(400); state = GetSettingsState();
+    Check(abs(state.sliderPosition) < 0.01f && state.title == L"轻度" && !ui::GetMotionInfo(hwnd).running,
+        "light selector settles without continuous idle repaint");
+    constexpr array<int, 5> stops{62, 156, 250, 344, 438};
+    constexpr array<const wchar_t*, 5> names{L"轻度", L"中", L"高", L"极高", L"终极"};
+    for (unsigned level = 1; level < 4; ++level) {
+        Click(hwnd, stops[level], 289); UpdateWindow(hwnd); Pump(430);
+        state = GetSettingsState();
+        Check(state.working.animationLevel == level && state.title == names[level] &&
+            abs(state.sliderPosition - level) < 0.01f, "accent tiers land on all five discrete selector stops");
+    }
+    Snapshot(hwnd, root / L"settings-extreme-ui");
+    Click(hwnd, 438, 289); UpdateWindow(hwnd);
+    Check(GetSettingsState().working.animationLevel == 4 && GetSettingsState().title == L"XuanRikka",
+        "ultimate begins with the short XuanRikka signature");
+    Pump(205); Check(GetSettingsState().title == L"XuanRikka", "ultimate signature remains briefly visible");
+    Snapshot(hwnd, root / L"settings-xuanrikka-ui", false);
+    Pump(430); Check(GetSettingsState().title == L"终极", "ultimate label transitions from signature to final tier");
+    const auto starFrames = ui::GetMotionInfo(hwnd).frames; Pump(80);
+    Check(ui::GetMotionInfo(hwnd).running && ui::GetMotionInfo(hwnd).frames > starFrames,
+        "ultimate gradient and flowing stars remain animated while visible");
+    Snapshot(hwnd, root / L"settings-ultimate-ui", false);
+    Pump(300);
+    const auto steadyStart = GetTickCount64(), steadyFrames = ui::GetMotionInfo(hwnd).frames;
+    Pump(500);
+    cout << "Ultimate selector steady target: " << ui::GetMotionInfo(hwnd).refreshRate << " Hz, frame messages: "
+        << ui::GetMotionInfo(hwnd).frames - steadyFrames << " in " << GetTickCount64() - steadyStart << " ms (scheduler sample, not presented FPS)\n";
+    Pointer(hwnd, WM_LBUTTONDOWN, 62, 289, MK_LBUTTON);
+    Check(GetSettingsState().sliderDragging && GetCapture() == hwnd, "selector captures the pointer while scrubbing");
+    Pointer(hwnd, WM_MOUSEMOVE, 438, 289, MK_LBUTTON);
+    Check(GetSettingsState().working.animationLevel == 4 && GetSettingsState().title == L"XuanRikka", "drag reaches ultimate tier");
+    Pointer(hwnd, WM_MOUSEMOVE, 156, 289, MK_LBUTTON); Pointer(hwnd, WM_LBUTTONUP, 156, 289);
+    Pump(500);
+    Check(!GetSettingsState().sliderDragging && GetSettingsState().working.animationLevel == 1 && GetSettingsState().title == L"中",
+        "fast scrub cancels the pending ultimate label and releases capture");
+    Click(hwnd, 250, 289); SendMessageW(hwnd, WM_KEYDOWN, VK_HOME, 0); SendMessageW(hwnd, WM_KEYDOWN, VK_LEFT, 0);
+    Check(GetSettingsState().working.animationLevel == 0, "keyboard selection clamps at light tier");
+    SendMessageW(hwnd, WM_KEYDOWN, VK_END, 0); SendMessageW(hwnd, WM_KEYDOWN, VK_RIGHT, 0);
+    Check(GetSettingsState().working.animationLevel == 4 && GetSettingsState().title == L"XuanRikka", "keyboard End reaches ultimate");
+    SendMessageW(hwnd, WM_KEYDOWN, VK_LEFT, 0); Pump(600);
+    Check(GetSettingsState().working.animationLevel == 3 && GetSettingsState().title == L"极高", "keyboard reversal cancels signature transition");
+    Pointer(hwnd, WM_LBUTTONDOWN, 250, 289, MK_LBUTTON); ReleaseCapture();
+    Check(!GetSettingsState().sliderDragging && GetSettingsState().working.animationLevel == 2, "lost pointer capture cancels scrub state cleanly");
+    Click(hwnd, 438, 289); Click(hwnd, 306, 92); Click(hwnd, 340, 211);
+    Check(ui::MotionLevel() == 4 && ui::accent.GetValue() == ui::AccentColor(3).GetValue(), "settings provides live motion and accent preview");
+    Pump(700); Check(!ui::GetMotionInfo(hwnd).running, "leaving ultimate motion page stops its star loop");
+    Click(hwnd, 350, 768);
+    Check(!SettingsVisible() && ui::MotionLevel() == initial.animationLevel && ui::accent.GetValue() == ui::AccentColor(initial.accentColor).GetValue(),
+        "cancel rolls back live motion and accent preview");
+    warning.clear(); Check(applied == 0 && LoadConfig(file, warning).animationLevel == 2 && warning.empty(), "cancel preserves persisted configuration");
+    const auto hiddenFrames = ui::GetMotionInfo(hwnd).frames; Pump(90);
+    Check(!ui::GetMotionInfo(hwnd).running && ui::GetMotionInfo(hwnd).frames == hiddenFrames, "hidden ultimate settings has no scheduled frames");
+    ShowSettings(initial); Click(hwnd, 190, 92); Click(hwnd, 438, 289);
+    Click(hwnd, 96, 448); Click(hwnd, 250, 508); Click(hwnd, 250, 566); Click(hwnd, 250, 624);
+    Click(hwnd, 306, 92); Click(hwnd, 430, 211); Click(hwnd, 365, 536); Click(hwnd, 403, 627);
+    Click(hwnd, 412, 92); Pointer(hwnd, WM_LBUTTONDOWN, 62, 243, MK_LBUTTON);
+    Pointer(hwnd, WM_MOUSEMOVE, 438, 243, MK_LBUTTON); Pointer(hwnd, WM_LBUTTONUP, 438, 243);
+    SendMessageW(hwnd, WM_KEYDOWN, VK_HOME, 0); Check(GetSettingsState().working.captureShade == 25, "shade keyboard Home reaches lightest background");
+    SendMessageW(hwnd, WM_KEYDOWN, VK_END, 0); Click(hwnd, 250, 362);
+    Snapshot(hwnd, root / L"settings-capture-ui"); Click(hwnd, 100, 768);
+    warning.clear(); Config saved = LoadConfig(file, warning);
+    Check(applied == 1 && !SettingsVisible() && warning.empty() && saved.animationLevel == 4 && saved.animationSpeed == 0 &&
+        saved.accentColor == 4 && saved.previewCorner == 3 && saved.previewSize == 2 && saved.captureShade == 80 &&
+        !saved.startupAnimation && !saved.captureAnimation && !saved.dragAnimation && !saved.captureGuides,
+        "native settings saves all custom controls and independent animation switches");
+    Check(ui::MotionLevel() == 4 && ui::accent.GetValue() == ui::AccentColor(4).GetValue(), "save keeps chosen live style as rollback baseline");
+    ShowSettings(saved); Click(hwnd, 190, 92);
+    Check(GetSettingsState().title == L"终极", "reopening persisted ultimate skips an artificial signature replay");
+    Click(hwnd, 62, 289); Click(hwnd, 306, 92); Click(hwnd, 70, 211); SendMessageW(hwnd, WM_KEYDOWN, VK_ESCAPE, 0);
+    Check(!SettingsVisible() && ui::MotionLevel() == 4 && ui::accent.GetValue() == ui::AccentColor(4).GetValue(),
+        "Escape restores most recently saved preview baseline");
+    DestroySettings(); Pump(40); const DWORD resources = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+    for (unsigned repeat = 0; repeat < 3; ++repeat) {
+        Check(InitSettings(instance, nullptr, [](const Config&, wstring&) { return true; }), "recreate settings animation fixture");
+        ShowSettings(saved); HWND next = OwnWindow(L"ScreenShotPlus.Settings"); Click(next, 190, 92); UpdateWindow(next); Pump(80);
+        Check(ui::GetMotionInfo(next).running, "recreated ultimate selector animates");
+        SendMessageW(next, WM_CLOSE, 0, 0); const auto stoppedFrames = ui::GetMotionInfo(next).frames; Pump(60);
+        Check(!ui::GetMotionInfo(next).running && ui::GetMotionInfo(next).frames == stoppedFrames, "closing settings cancels ultimate frame loop");
+        DestroySettings(); Pump(20);
+        Check(GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) <= resources + 2, "settings selector releases cached buffers and GDI resources");
+    }
+}
 void WritePermissions(const filesystem::path& root) {
     const auto folder = root / (L"permission-test-" + to_wstring(GetTickCount64()));
     Check(filesystem::create_directory(folder), "fresh permission test directory");
@@ -595,20 +819,33 @@ void WritePermissions(const filesystem::path& root) {
 LRESULT CALLBACK PatternProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     if (msg == WM_PAINT) {
         PAINTSTRUCT ps{}; HDC dc = BeginPaint(hwnd, &ps);
-        { Graphics g(dc); g.Clear(Color(255, 29, 137, 211)); }
+        {
+            Graphics g(dc); g.Clear(Color(255, 29, 137, 211));
+            RECT client{}; GetClientRect(hwnd, &client);
+            if (client.right > 700) {
+                ui::Text(g, L"ScreenShotPlus", {static_cast<float>(client.right / 2 - 260),
+                    static_cast<float>(client.bottom / 2 - 44), 540, 70}, 44, ui::foreground, true);
+                ui::Text(g, L"隔离截图场景 · 原始像素保持不变", {static_cast<float>(client.right / 2 - 240),
+                    static_cast<float>(client.bottom / 2 + 38), 530, 40}, 24, ui::foreground);
+            }
+        }
         EndPaint(hwnd, &ps); return 0;
     }
     return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 void CaptureAndPreview(HINSTANCE instance, const filesystem::path& root) {
-    WNDCLASSW cls{}; cls.lpfnWndProc = PatternProc; cls.hInstance = instance; cls.lpszClassName = L"ScreenShotPlus.TestPattern";
-    Check(RegisterClassW(&cls) != 0, "test pattern class");
+    WNDCLASSEXW cls{sizeof(cls)}, existing{sizeof(existing)};
+    cls.lpfnWndProc = PatternProc; cls.hInstance = instance; cls.lpszClassName = L"ScreenShotPlus.TestPattern";
+    if (!GetClassInfoExW(instance, cls.lpszClassName, &existing)) Check(RegisterClassExW(&cls) != 0, "test pattern class");
     HWND pattern = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, cls.lpszClassName, L"Screenshot test pattern", WS_POPUP,
-        100, 100, 400, 300, nullptr, nullptr, instance, nullptr);
+        GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+        GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN), nullptr, nullptr, instance, nullptr);
     Check(pattern != nullptr, "test pattern window");
+    struct PatternCleanup { HWND hwnd; ~PatternCleanup() { if (IsWindow(hwnd)) DestroyWindow(hwnd); } } cleanup{pattern};
     ShowWindow(pattern, SW_SHOWNOACTIVATE); UpdateWindow(pattern); DwmFlush();
     unique_ptr<Bitmap> result;
     POINT finished{}; wstring error; bool called = false;
+    SelectionGuard selectionGuard;
     Check(BeginSelection(instance, [&](unique_ptr<Bitmap> image, POINT point, wstring failure) {
         result = move(image); finished = point; error = move(failure); called = true;
     }, error), "desktop freeze");
@@ -662,6 +899,144 @@ void CaptureAndPreview(HINSTANCE instance, const filesystem::path& root) {
     Pointer(preview, WM_LBUTTONUP, 140, 100);
     Check(dragged && !edited && PreviewVisible(), "drag threshold and paused timer without editor");
     Pump(1300); Check(!PreviewVisible(), "preview timer expires"); DestroyPreview();
+}
+void CustomizationUi(HINSTANCE instance, const filesystem::path& root) {
+    struct RestoreOptions {
+        ~RestoreOptions() { CancelSelection(); DestroyPreview(); ConfigureCapture(60, true, true); ConfigurePreview(0, 1, true); ui::SetMotionOptions(2, 1); }
+    } restore;
+    WNDCLASSEXW cls{sizeof(cls)}, existing{sizeof(existing)};
+    cls.lpfnWndProc = PatternProc; cls.hInstance = instance; cls.lpszClassName = L"ScreenShotPlus.TestPattern";
+    if (!GetClassInfoExW(instance, cls.lpszClassName, &existing)) Check(RegisterClassExW(&cls) != 0, "customization pattern class");
+    HWND pattern = CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, cls.lpszClassName,
+        L"Isolated customization fixture", WS_POPUP, GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+        GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN), nullptr, nullptr, instance, nullptr);
+    Check(pattern != nullptr, "customization pattern window");
+    struct PatternCleanup { HWND hwnd; ~PatternCleanup() { if (IsWindow(hwnd)) DestroyWindow(hwnd); } } cleanup{pattern};
+    ShowWindow(pattern, SW_SHOWNOACTIVATE); UpdateWindow(pattern); DwmFlush();
+    COLORREF bright = 0;
+    unique_ptr<Bitmap> image; wstring error;
+    // Capture callbacks refer to these locals. Cancel while they are still
+    // alive on both normal exit and exception unwinding.
+    SelectionGuard selectionGuard;
+    DWORD baseline = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+    for (const unsigned shade : {25u, 80u}) {
+        ConfigureCapture(shade, false, false);
+        Check(BeginSelection(instance, [&](unique_ptr<Bitmap> captured, POINT, wstring failure) {
+            image = move(captured); error = move(failure);
+        }, error), "capture customized shade with entrance disabled");
+        HWND overlay = OwnWindow(L"ScreenShotPlus.Selection");
+        Check(overlay != nullptr, "customized selection window available");
+        UpdateWindow(overlay); Pump(70);
+        Check(!ui::GetMotionInfo(overlay).running, "disabled capture entrance leaves no idle animation loop");
+        const COLORREF pixel = PrintedPixel(overlay, 40, 40);
+        if (shade == 25) bright = pixel;
+        else Check(GetBValue(pixel) < GetBValue(bright) && GetGValue(pixel) < GetGValue(bright),
+            "capture shade changes frozen background brightness");
+        if (shade == 80) Snapshot(overlay, root / L"capture-custom-shade-ui", false);
+        const int x = 150 - GetSystemMetrics(SM_XVIRTUALSCREEN), y = 150 - GetSystemMetrics(SM_YVIRTUALSCREEN);
+        SendMessageW(overlay, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x, y));
+        SendMessageW(overlay, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(x + 80, y + 60));
+        SendMessageW(overlay, WM_LBUTTONUP, 0, MAKELPARAM(x + 80, y + 60));
+        Check(image && error.empty() && image->GetWidth() == 80 && image->GetHeight() == 60,
+            "customized capture returns original physical dimensions");
+        Color original; image->GetPixel(20, 20, &original);
+        Check(original.GetR() == 29 && original.GetG() == 137 && original.GetB() == 211 && original.GetA() == 255,
+            "shade and guide settings never alter original capture pixels");
+        Check(GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) <= baseline + 2, "custom capture cached surfaces released");
+    }
+    cerr << "Native dirty fixture: begin opaque selection\n";
+    ConfigureCapture(60, false, false);
+    Check(BeginSelection(instance, [&](unique_ptr<Bitmap> captured, POINT, wstring failure) {
+        image = move(captured); error = move(failure);
+    }, error), "native dirty-region capture fixture");
+    HWND nativeOverlay = OwnWindow(L"ScreenShotPlus.Selection");
+    Check(nativeOverlay && !(GetWindowLongPtrW(nativeOverlay, GWL_EXSTYLE) & WS_EX_LAYERED), "native dirty-region fixture is opaque");
+    RECT client{}; GetClientRect(nativeOverlay, &client);
+    const float scale = ui::Scale(nativeOverlay);
+    const int right = client.right - static_cast<int>(12 * scale), bottom = client.bottom - static_cast<int>(12 * scale),
+        top = bottom - static_cast<int>(80 * scale);
+    SendMessageW(nativeOverlay, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(right - 2, top));
+    SendMessageW(nativeOverlay, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(right, bottom));
+    // This fixture explicitly disables animation. Paint synchronously so a
+    // queued physical WM_MOUSEMOVE cannot overwrite the synthetic endpoint.
+    UpdateWindow(nativeOverlay); DwmFlush();
+    const LONG labelX = static_cast<LONG>(floor(client.right - 252 * scale)),
+        labelY = static_cast<LONG>(floor(top - 42 * scale - 10 * scale));
+    const RECT band{labelX + static_cast<LONG>(8 * scale), labelY + static_cast<LONG>(8 * scale),
+        labelX + static_cast<LONG>(162 * scale), labelY + static_cast<LONG>(34 * scale)};
+    cerr << "Native dirty fixture: painted 2px ROI, band " << band.left << ',' << band.top << ',' << band.right << ',' << band.bottom << '\n';
+    POINT bandCenter{(band.left + band.right) / 2, (band.top + band.bottom) / 2}; ClientToScreen(nativeOverlay, &bandCenter);
+    RECT nativeWindow{}; GetWindowRect(nativeOverlay, &nativeWindow);
+    const HWND hitWindow = WindowFromPoint(bandCenter);
+    wchar_t hitClass[128]{}; GetClassNameW(hitWindow, hitClass, 128);
+    cerr << "Native window visible=" << IsWindowVisible(nativeOverlay) << ", foreground=" << (GetForegroundWindow() == nativeOverlay)
+        << ", point hit overlay=" << (hitWindow == nativeOverlay) << ", style=" << GetWindowLongPtrW(nativeOverlay, GWL_EXSTYLE)
+        << ", window rect " << nativeWindow.left << ',' << nativeWindow.top << ',' << nativeWindow.right << ',' << nativeWindow.bottom << '\n';
+    wcerr << L"Native point hit class: " << hitClass << L'\n';
+    auto before = NativePixels(nativeOverlay, band);
+    Color background; before->GetPixel(1, 1, &background);
+    cerr << "Native label background RGB " << static_cast<unsigned>(background.GetR()) << ',' << static_cast<unsigned>(background.GetG()) << ','
+        << static_cast<unsigned>(background.GetB()) << "; expected " << static_cast<unsigned>(ui::background.GetR()) << ','
+        << static_cast<unsigned>(ui::background.GetG()) << ',' << static_cast<unsigned>(ui::background.GetB()) << '\n';
+    Check(abs(static_cast<int>(background.GetR()) - ui::background.GetR()) <= 2 &&
+        abs(static_cast<int>(background.GetG()) - ui::background.GetG()) <= 2 &&
+        abs(static_cast<int>(background.GetB()) - ui::background.GetB()) <= 2,
+        "native narrow right-bottom selection paints its clamped dimensions label");
+    const auto beforeHash = PixelHash(*before);
+    filesystem::path nativeFile;
+    Check(SavePng(*before, root / L"capture-native-label-before", nativeFile, error), "save native dirty label evidence");
+    SendMessageW(nativeOverlay, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(right + 1, bottom));
+    UpdateWindow(nativeOverlay); DwmFlush();
+    auto after = NativePixels(nativeOverlay, band);
+    cerr << "Native dirty fixture: painted 3px ROI, before hash " << beforeHash << ", after hash " << PixelHash(*after) << '\n';
+    Check(PixelHash(*after) != beforeHash,
+        "native dimensions update when narrow selection changes inside the same clamped dirty rectangle");
+    Check(SavePng(*after, root / L"capture-native-label-after", nativeFile, error), "save native changed label evidence");
+    SendMessageW(nativeOverlay, WM_LBUTTONUP, 0, MAKELPARAM(right + 1, bottom));
+    Check(image && image->GetWidth() == 3 && image->GetHeight() == static_cast<UINT>(bottom - top),
+        "narrow edge selection still crops exact physical dimensions");
+    Check(GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) <= baseline + 2, "native dirty-region fixture releases capture surfaces");
+    DestroyWindow(pattern);
+    Bitmap previewImage(320, 180, PixelFormat32bppRGB);
+    { Graphics g(&previewImage); g.Clear(Color(255, 29, 137, 211)); }
+    filesystem::path file; Check(SavePng(previewImage, root / L"custom-preview-source", file, error), "save customized preview fixture");
+    Check(InitPreview(instance, [] {}), "customized preview initialization");
+    const HWND foreground = GetForegroundWindow();
+    POINT cursor{}; GetCursorPos(&cursor);
+    MONITORINFO monitor{sizeof(monitor)}; GetMonitorInfoW(MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST), &monitor);
+    const POINT anchor{(monitor.rcWork.left + monitor.rcWork.right) / 2, (monitor.rcWork.top + monitor.rcWork.bottom) / 2};
+    const RECT origin{anchor.x - 120, anchor.y - 80, anchor.x + 120, anchor.y + 80};
+    for (unsigned corner = 0; corner < 4; ++corner) {
+        ConfigurePreview(corner, 1, false);
+        ShowPreview(&previewImage, file, anchor, 0, origin); UpdateWindow(OwnWindow(L"ScreenShotPlus.Preview"));
+        Check(!GetVisualEffectInfo().window, "capture animation switch suppresses screenshot flight");
+        RECT rect{}; GetWindowRect(OwnWindow(L"ScreenShotPlus.Preview"), &rect);
+        const int centerX = (rect.left + rect.right) / 2, centerY = (rect.top + rect.bottom) / 2;
+        Check((corner == 1 || corner == 3) ? centerX < anchor.x : centerX > anchor.x,
+            "preview honors selected horizontal monitor corner");
+        Check(corner >= 2 ? centerY < anchor.y : centerY > anchor.y, "preview honors selected vertical monitor corner");
+        HidePreview();
+    }
+    int previousWidth = 0, previousHeight = 0;
+    for (unsigned size = 0; size < 3; ++size) {
+        ConfigurePreview(0, size, false); ShowPreview(&previewImage, file, anchor);
+        HWND hwnd = OwnWindow(L"ScreenShotPlus.Preview"); UpdateWindow(hwnd);
+        RECT rect{}; GetWindowRect(hwnd, &rect);
+        Check(rect.right - rect.left > previousWidth && rect.bottom - rect.top > previousHeight,
+            "three preview sizes change physical window dimensions");
+        previousWidth = rect.right - rect.left; previousHeight = rect.bottom - rect.top;
+        const RECT fitted = PreviewImageScreenRect();
+        Check(fitted.left >= rect.left && fitted.right <= rect.right && fitted.top >= rect.top && fitted.bottom <= rect.bottom &&
+            abs(static_cast<float>(fitted.right - fitted.left) / (fitted.bottom - fitted.top) - 320.0f / 180) < 0.02f,
+            "custom preview retains image aspect ratio and DPI-scaled physical bounds");
+        if (size == 2) Snapshot(hwnd, root / L"preview-custom-size-ui");
+        HidePreview();
+    }
+    Check(GetForegroundWindow() == foreground && filesystem::exists(file), "custom preview preserves focus and saved image");
+    ui::SetMotionOptions(1, 1); ConfigurePreview(0, 1, true); ShowPreview(&previewImage, file, anchor, 0, origin);
+    Check(!GetVisualEffectInfo().window, "medium tier keeps screenshot flight restrained"); HidePreview();
+    ui::SetMotionOptions(0, 1);
+    Check(!BeginDragVisual(previewImage, origin) && !GetVisualEffectInfo().window, "light tier suppresses decorative floating drag card");
 }
 bool ProbeHotkey(UINT modifiers, UINT key) {
     return async(launch::async, [=] {
@@ -905,8 +1280,74 @@ void ExecutableSmoke(const filesystem::path& executable) {
     Check(WaitForSingleObject(first.hProcess, 5000) == WAIT_OBJECT_0, "actual EXE shuts down gracefully");
     cout << "PASS actual EXE startup / duplicate manual and tray launch / graceful shutdown\n";
 }
+void StartupUi(const filesystem::path& executable, const filesystem::path& root) {
+    ui::SetMotionOptions(4, 1); const bool animationAvailable = ui::DecorativeMotion(4); ui::SetMotionOptions(2, 1);
+    for (unsigned variant = 0; variant < 4; ++variant) {
+        const bool enabled = variant != 1, tray = variant == 2;
+        Config config = DefaultConfig(); config.folder = root / L"startup-fixture-images";
+        config.modifiers = MOD_CONTROL | MOD_ALT | MOD_SHIFT; config.key = VK_F19;
+        config.animationLevel = variant == 3 ? 2 : 4; config.startupAnimation = enabled;
+        const auto file = root / (L"startup-" + to_wstring(variant)) / L"config.json";
+        wstring error; Check(SaveConfig(file, config, error), "isolated persisted startup animation preference");
+        STARTUPINFOW startup{sizeof(startup)}; PROCESS_INFORMATION child{};
+        wstring command = L"\"" + executable.wstring() + L"\" --startup-fixture \"" + file.wstring() + L"\"" + (tray ? L" --tray" : L"");
+        Check(CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &child),
+            "launch native application startup fixture with isolated config");
+        struct ChildCleanup {
+            PROCESS_INFORMATION process;
+            ~ChildCleanup() {
+                if (WaitForSingleObject(process.hProcess, 0) == WAIT_TIMEOUT) PostThreadMessageW(process.dwThreadId, WM_QUIT, 0, 0);
+                if (WaitForSingleObject(process.hProcess, 5000) != WAIT_OBJECT_0) TerminateProcess(process.hProcess, 95);
+                CloseHandle(process.hThread); CloseHandle(process.hProcess);
+            }
+        } cleanup{child};
+        HWND panel = nullptr;
+        const auto deadline = GetTickCount64() + 5000;
+        while (!panel && GetTickCount64() < deadline) {
+            struct Search { DWORD process; HWND window = nullptr; } search{child.dwProcessId};
+            EnumWindows([](HWND hwnd, LPARAM param) -> BOOL {
+                auto& search = *reinterpret_cast<Search*>(param);
+                DWORD process = 0; GetWindowThreadProcessId(hwnd, &process);
+                wchar_t name[128]{}; GetClassNameW(hwnd, name, 128);
+                if (process == search.process && wstring_view(name) == PANEL_CLASS && GetPropW(hwnd, L"ScreenShotPlus.Ready")) {
+                    search.window = hwnd; return FALSE;
+                }
+                return TRUE;
+            }, reinterpret_cast<LPARAM>(&search));
+            panel = search.window;
+            if (!panel) Pump(15);
+        }
+        Check(panel && WaitForSingleObject(child.hProcess, 0) == WAIT_TIMEOUT, "startup fixture initializes its real message loop");
+        const bool expected = variant == 0 && animationAvailable;
+        Check((GetPropW(panel, L"ScreenShotPlus.StartupAnimating") != nullptr) == expected,
+            "startup reads ultimate preference and honors disabled, lower-tier and tray launch policies");
+        if (expected) {
+            Pump(240); Snapshot(panel, root / L"startup-ultimate-ui", false);
+            const auto finish = GetTickCount64() + 2500;
+            while (GetPropW(panel, L"ScreenShotPlus.StartupAnimating") && GetTickCount64() < finish) Pump(20);
+            Check(!GetPropW(panel, L"ScreenShotPlus.StartupAnimating") && IsWindowVisible(panel), "ultimate startup settles to usable panel");
+            Snapshot(panel, root / L"startup-settled-ui");
+        } else {
+            if (tray && GetPropW(panel, L"ScreenShotPlus.TrayRegistered")) Check(!IsWindowVisible(panel), "tray launch keeps startup silent");
+            Pump(400); Check(!GetPropW(panel, L"ScreenShotPlus.StartupAnimating"), "suppressed startup never starts a delayed intro");
+        }
+        PostThreadMessageW(child.dwThreadId, WM_QUIT, 0, 0);
+        Check(WaitForSingleObject(child.hProcess, 5000) == WAIT_OBJECT_0, "isolated startup fixture shuts down normally");
+        DWORD code = 1; GetExitCodeProcess(child.hProcess, &code); Check(code == 0, "startup fixture exits successfully");
+    }
+    if (!animationAvailable) cout << "SKIP ultimate startup choreography: system reduced motion is enabled; startup suppression verified\n";
+}
 }
 int wmain(int argc, wchar_t** argv) {
+    if ((argc == 3 || argc == 4) && wstring_view(argv[1]) == L"--startup-fixture") {
+        const HRESULT ole = OleInitialize(nullptr); if (FAILED(ole)) return 2;
+        GdiplusStartupInput input; ULONG_PTR token = 0;
+        if (GdiplusStartup(&token, &input, nullptr) != Ok) { OleUninitialize(); return 3; }
+        TestStartupKey startup;
+        const int code = RunApp(GetModuleHandleW(nullptr), filesystem::path(argv[2]), argc == 4 && wstring_view(argv[3]) == L"--tray", startup.key.c_str());
+        CancelVisualEffects(); CancelSelection(); DestroyEditor(); DestroySettings(); DestroyPreview();
+        GdiplusShutdown(token); OleUninitialize(); return code;
+    }
     if (argc == 2 && wstring_view(argv[1]) == L"--tray-probe") {
         cout << "Process integrity RID=" << CurrentProcessIntegrity() << '\n';
         HWND shell = FindWindowW(L"Shell_TrayWnd", nullptr);
@@ -951,17 +1392,20 @@ int wmain(int argc, wchar_t** argv) {
     int code = 0;
     try {
         filesystem::create_directories(root);
-        AnimationTiming(); cout << "PASS fractional refresh / 120 fallback / interrupted curves / time-based duration / reduced motion\n";
+        AnimationTiming(); cout << "PASS fractional refresh / 120 fallback / interrupted curves / time-based duration / five motion tiers / speeds / reduced motion\n";
         if (liveUi) {
             AnimationUi(GetModuleHandleW(nullptr), root); cout << "PASS animation frames / hover / toggle / press / idle / hide / reopen / GDI lifetime\n";
             RichEffectsUi(GetModuleHandleW(nullptr), root); cout << "PASS layered flight / drag card / copy feedback / cancel return / accepted drop / input transparency / resource lifetime (visual fixture, not client acceptance)\n";
+            CustomizationUi(GetModuleHandleW(nullptr), root); cout << "PASS capture customization / original pixels / entrance off / preview corner and size / physical DPI / restrained tiers (isolated native UI fixture)\n";
+            SettingsMotionUi(GetModuleHandleW(nullptr), root); cout << "PASS native five-stop selector / light-tier forced animation / signature and final label / scrub and keyboard / style rollback and persistence / hidden idle and GDI lifetime\n";
+            StartupUi(filesystem::absolute(argv[0]), root); cout << "PASS persisted ultimate startup / disabled and lower-tier suppression / silent tray startup / normal shutdown (isolated child application fixture)\n";
         }
         if (!animationOnly) {
         Geometry(); cout << "PASS selection geometry\n";
         InstanceProcesses(filesystem::absolute(argv[0])); cout << "PASS 8 concurrent processes / single-instance mutex / restart\n";
         InstanceActivation(GetModuleHandleW(nullptr)); cout << "PASS delayed primary window / duplicate activation\n";
         TrayTransitions(); cout << "PASS simulated Shell failure / recovery / legacy event handling (not actual tray acceptance)\n";
-        Configuration(root); cout << "PASS config round trip / corrupt and unwritable paths\n";
+        Configuration(root); cout << "PASS config round trip / legacy motion defaults / custom preferences / strict malformed ranges / corrupt and unwritable paths\n";
         ConfigurationFallback(root, filesystem::absolute(argv[0])); cout << "PASS config fallback / detailed errors / real process portable restart\n";
         const auto file = PngStorage(root); cout << "PASS PNG pixels / Unicode paths / unique saves\n";
         FileTransfer(file); cout << "PASS Unicode file transfer / copy-only format\n";

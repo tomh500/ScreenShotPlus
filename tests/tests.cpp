@@ -57,6 +57,8 @@ void Pointer(HWND hwnd, UINT message, int x, int y, WPARAM keys = 0) {
     SendMessageW(hwnd, message, keys, MAKELPARAM(static_cast<int>(x * scale), static_cast<int>(y * scale)));
 }
 void Snapshot(HWND hwnd, const filesystem::path& folder) {
+    // Acceptance captures show the settled layout, not the entrance veil.
+    Pump(300);
     UpdateWindow(hwnd);
     RECT rect{}; GetClientRect(hwnd, &rect);
     HDC dc = GetDC(hwnd), memory = CreateCompatibleDC(dc);
@@ -73,6 +75,104 @@ void Snapshot(HWND hwnd, const filesystem::path& folder) {
     }
     DeleteObject(bitmap);
     Check(saved, "UI snapshot failed");
+}
+void AnimationTiming() {
+    Check(abs(ui::RefreshRateValue(60000, 1001) - 59.94005994) < 0.00001, "fractional display refresh rate preserved");
+    Check(ui::RefreshRateValue(144, 1) == 144 && ui::RefreshRateValue(240, 1) == 240, "high refresh rate not capped at 120");
+    for (const auto rate : {ui::RefreshRateValue(0, 1), ui::RefreshRateValue(1, 1), ui::RefreshRateValue(120, 0), ui::RefreshRateValue(2000, 1)})
+        Check(rate == 120, "unknown or invalid refresh rate falls back to 120");
+    ui::Tween curve;
+    curve.Set(1, 10, 0.2);
+    Check(curve.Value(9) == 0 && curve.Value(10) == 0 && curve.Value(10.2) == 1, "animation endpoints clamp without overshoot");
+    Check(abs(curve.Value(10.1) - 0.875f) < 0.0001f, "time-based cubic easing");
+    for (const double rate : {59.94, 60.0, 120.0, 144.0, 240.0}) {
+        float previous = 0;
+        for (int frame = 0; frame <= static_cast<int>(ceil(rate * 0.2)); ++frame) {
+            const float value = curve.Value(10 + frame / rate);
+            Check(value >= previous && value <= 1, "animation monotonic at all refresh rates"); previous = value;
+        }
+        Check(!curve.Active(10.21), "animation duration independent of refresh rate");
+    }
+    const float before = curve.Value(10.08);
+    curve.Set(0, 10.08, 0.16);
+    Check(abs(curve.Value(10.08) - before) < 0.0001f && curve.Value(10.25) == 0, "interrupted transition reverses continuously");
+    curve.Set(1, 11, 0.2, false);
+    Check(curve.Value(11) == 1 && !curve.Active(11), "reduced motion settles immediately");
+}
+struct MotionFixture { bool hovered = false, enabled = false; };
+LRESULT CALLBACK MotionFixtureProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (ui::MotionMessage(hwnd, message, wparam, lparam)) return 0;
+    if (message == WM_NCCREATE) SetWindowLongPtrW(hwnd, GWLP_USERDATA,
+        reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(lparam)->lpCreateParams));
+    auto state = reinterpret_cast<MotionFixture*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    switch (message) {
+    case WM_PAINT: case WM_PRINTCLIENT: {
+        ui::Paint paint(hwnd, message == WM_PRINTCLIENT ? reinterpret_cast<HDC>(wparam) : nullptr);
+        Graphics g(paint.buffer); ui::Prepare(g, hwnd);
+        ui::Text(g, L"流畅，也从容", {24, 20, 300, 36}, 25, ui::foreground, true);
+        ui::Button(g, hwnd, {24, 72, 292, 44}, L"开始区域截图", true, state->hovered);
+        ui::Toggle(g, hwnd, {24, 130, 292, 44}, L"动画效果", state->enabled, state->hovered);
+        return 0;
+    }
+    case WM_APP + 100:
+        state->hovered = wparam != 0; state->enabled = lparam != 0;
+        InvalidateRect(hwnd, nullptr, FALSE); return 0;
+    case WM_ERASEBKGND: return 1;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+void AnimationUi(HINSTANCE instance, const filesystem::path& root) {
+    WNDCLASSEXW cls{sizeof(cls)}; cls.hInstance = instance; cls.lpfnWndProc = MotionFixtureProc;
+    cls.lpszClassName = L"ScreenShotPlus.Tests.Motion"; cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    Check(RegisterClassExW(&cls) != 0, "register animation fixture");
+    const auto waitForIdle = [](HWND hwnd) {
+        const auto deadline = GetTickCount64() + 2000;
+        while (ui::GetMotionInfo(hwnd).running && GetTickCount64() < deadline) Pump(20);
+    };
+    DWORD settledResources = 0;
+    for (int iteration = 0; iteration < 8; ++iteration) {
+        MotionFixture fixture;
+        HWND window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, cls.lpszClassName, L"ScreenShotPlus 动画验证",
+            WS_POPUP, 24, 24, 340, 196, nullptr, nullptr, instance, &fixture);
+        Check(window != nullptr, "create animated window");
+        struct WindowCleanup { HWND window; ~WindowCleanup() { if (IsWindow(window)) DestroyWindow(window); } } cleanup{window};
+        ui::Corners(window);
+        ui::Place(window, 340, 196);
+        ShowWindow(window, SW_SHOWNOACTIVATE); UpdateWindow(window); Pump(380);
+        waitForIdle(window);
+        auto info = ui::GetMotionInfo(window);
+        Check(abs(info.refreshRate - ui::RefreshRate(window)) < 0.01, "scheduler uses actual window monitor refresh rate");
+        Check(!info.running, "entrance stops at its final frame");
+        if (iteration == 0) cout << "Animation monitor target: " << info.refreshRate << " Hz, entrance frame messages: " << info.frames
+            << ", system animations: " << info.enabled << '\n';
+        const auto idleFrames = info.frames;
+        Pump(70); Check(ui::GetMotionInfo(window).frames == idleFrames, "idle window does not continuously repaint");
+        SendMessageW(window, WM_APP + 100, 1, 1); UpdateWindow(window);
+        if (info.enabled) {
+            Check(ui::GetMotionInfo(window).running, "hover and toggle transition starts");
+            Pump(35); Check(ui::GetMotionInfo(window).frames > idleFrames, "high resolution clock delivers animation frames");
+        }
+        Pointer(window, WM_LBUTTONDOWN, 120, 90, MK_LBUTTON); UpdateWindow(window); Pump(30);
+        Pointer(window, WM_LBUTTONUP, 120, 90); UpdateWindow(window);
+        Pump(280); Check(!ui::GetMotionInfo(window).running, "press release and toggle settle");
+        SendMessageW(window, WM_APP + 100, 0, 0); UpdateWindow(window);
+        ShowWindow(window, SW_HIDE);
+        const auto hiddenFrames = ui::GetMotionInfo(window).frames;
+        Pump(80); Check(!ui::GetMotionInfo(window).running && ui::GetMotionInfo(window).frames == hiddenFrames, "hidden window cancels scheduled frames");
+        ShowWindow(window, SW_SHOWNOACTIVATE); UpdateWindow(window); Pump(320);
+        waitForIdle(window);
+        SendMessageW(window, WM_DISPLAYCHANGE, 32, 0); SendMessageW(window, WM_SETTINGCHANGE, 0, 0); UpdateWindow(window);
+        Check(!ui::GetMotionInfo(window).running, "display and settings updates do not leave an idle animation loop");
+        if (iteration == 0) Snapshot(window, root / L"animation-ui");
+        DestroyWindow(window); Pump(20);
+        if (iteration == 0) settledResources = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+        else {
+            const DWORD resources = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+            cout << "Animation GDI resources after window " << iteration + 1 << ": " << resources << " (baseline " << settledResources << ")\n";
+            Check(resources <= settledResources + 2, "animated window and cached buffers release GDI handles");
+        }
+    }
+    UnregisterClassW(cls.lpszClassName, instance);
 }
 void Geometry() {
     RECT r = SelectionRect({90, 75}, {-20, 10}, 100, 80);
@@ -728,7 +828,13 @@ void ExecutableSmoke(const filesystem::path& executable) {
         Check(waited == WAIT_OBJECT_0 && code == 0 && WaitForSingleObject(first.hProcess, 0) == WAIT_TIMEOUT,
             "actual duplicate EXE exits and preserves primary");
         if (quiet && tray) Check(!IsWindowVisible(panel), "duplicate tray launch does not show panel");
-        if (!quiet) Check(IsWindowVisible(panel), "duplicate manual launch activates primary panel");
+        if (!quiet) {
+            // The duplicate exits after posting to the primary process. Its
+            // exit does not guarantee that the primary has dispatched it yet.
+            const ULONGLONG activationDeadline = GetTickCount64() + 2000;
+            while (!IsWindowVisible(panel) && GetTickCount64() < activationDeadline) Pump(20);
+            Check(IsWindowVisible(panel), "duplicate manual launch activates primary panel");
+        }
     }
     PostThreadMessageW(first.dwThreadId, WM_QUIT, 0, 0);
     Check(WaitForSingleObject(first.hProcess, 5000) == WAIT_OBJECT_0, "actual EXE shuts down gracefully");
@@ -768,6 +874,7 @@ int wmain(int argc, wchar_t** argv) {
         return waited == WAIT_OBJECT_0 ? 71 : 93;
     }
     const bool isolatedUi = argc > 1 && wstring_view(argv[1]) == L"--isolated-ui";
+    const bool animationOnly = argc > 1 && wstring_view(argv[1]) == L"--animation-ui";
     bool liveUi = !(argc > 1 && wstring_view(argv[1]) == L"--no-ui");
     HANDLE running = OpenMutexW(SYNCHRONIZE, FALSE, L"Local\\ScreenShotPlus.Singleton");
     if (running) { CloseHandle(running); if (!isolatedUi) liveUi = false; }
@@ -779,6 +886,9 @@ int wmain(int argc, wchar_t** argv) {
     int code = 0;
     try {
         filesystem::create_directories(root);
+        AnimationTiming(); cout << "PASS fractional refresh / 120 fallback / interrupted curves / time-based duration / reduced motion\n";
+        if (liveUi) { AnimationUi(GetModuleHandleW(nullptr), root); cout << "PASS animation frames / hover / toggle / press / idle / hide / reopen / GDI lifetime\n"; }
+        if (!animationOnly) {
         Geometry(); cout << "PASS selection geometry\n";
         InstanceProcesses(filesystem::absolute(argv[0])); cout << "PASS 8 concurrent processes / single-instance mutex / restart\n";
         InstanceActivation(GetModuleHandleW(nullptr)); cout << "PASS delayed primary window / duplicate activation\n";
@@ -800,6 +910,7 @@ int wmain(int argc, wchar_t** argv) {
         else cout << "SKIP application UI smoke: --no-ui or existing application instance\n";
         if (liveUi) ExecutableSmoke(filesystem::current_path() / L"x64" / L"Release" / L"ScreenShotPlus.exe");
         if (liveUi) { SettingsFailureUi(GetModuleHandleW(nullptr), root); cout << "PASS actual settings save error / visible config path\n"; }
+        }
         cout << "Monitors actually present: " << GetSystemMetrics(SM_CMONITORS) << '\n';
         wcout << L"Test artifacts: " << root.wstring() << L'\n';
     } catch (const exception& e) { cerr << "FAIL: " << e.what() << '\n'; code = 1; }

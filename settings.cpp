@@ -18,32 +18,33 @@ const RectF closeButton{452, 16, 28, 28}, folderButton{24, 180, 452, 44},
     saveButton{24, 746, 218, 44}, cancelButton{254, 746, 222, 44};
 void DrawSettings(HWND hwnd, HDC target = nullptr) {
     ui::Paint paint(hwnd, target); Graphics g(paint.buffer); ui::Prepare(g, hwnd);
-    ui::Text(g, L"设置 · v1.1.3", {24, 25, 390, 40}, 25, ui::foreground, true);
-    ui::Button(g, closeButton, L"×", false, ui::Inside(settings.mouse, closeButton));
+    ui::Text(g, L"设置 · v1.2.0", {24, 25, 390, 40}, 25, ui::foreground, true);
+    ui::Button(g, hwnd, closeButton, L"×", false, ui::Inside(settings.mouse, closeButton));
     ui::Text(g, L"保存目录", {24, 90, 452, 26}, 14, ui::muted);
     ui::Round(g, {24, 122, 452, 46}, 10, ui::surface);
     ui::Text(g, settings.working.folder.wstring(), {36, 131, 428, 30}, 12);
-    ui::Button(g, folderButton, L"选择文件夹…", false, ui::Inside(settings.mouse, folderButton));
+    ui::Button(g, hwnd, folderButton, L"选择文件夹…", false, ui::Inside(settings.mouse, folderButton));
     ui::Text(g, L"截图快捷键", {24, 238, 452, 26}, 14, ui::muted);
-    ui::Button(g, hotkeyButton, settings.listening ? L"请按组合键（Esc 取消）" : HotkeyText(settings.working) + L"   点击修改",
+    ui::Button(g, hwnd, hotkeyButton, settings.listening ? L"请按组合键（Esc 取消）" : HotkeyText(settings.working) + L"   点击修改",
         settings.listening, ui::Inside(settings.mouse, hotkeyButton));
-    ui::Button(g, printButton, settings.working.printScreen ? L"[已开启] 同时使用 PrintScreen" : L"[已关闭] 同时使用 PrintScreen",
-        false, ui::Inside(settings.mouse, printButton));
+    ui::Toggle(g, hwnd, printButton, L"同时使用 PrintScreen",
+        settings.working.printScreen, ui::Inside(settings.mouse, printButton));
     ui::Text(g, L"若 PrintScreen 仍打开系统截图，请在 Windows 设置中\n关闭“使用 Print Screen 键打开屏幕捕获”。", {24, 390, 452, 44}, 12, ui::muted);
     const auto seconds = settings.working.previewSeconds;
-    ui::Button(g, secondsButton, seconds ? L"缩略图：" + to_wstring(seconds) + L" 秒后收起   点击切换" :
+    ui::Button(g, hwnd, secondsButton, seconds ? L"缩略图：" + to_wstring(seconds) + L" 秒后收起   点击切换" :
         L"缩略图：保留至关闭或下一次截图   点击切换", false, ui::Inside(settings.mouse, secondsButton));
     ui::Text(g, L"悬停和拖拽期间暂停倒计时。截图文件始终保留。", {24, 506, 452, 24}, 12, ui::muted);
-    ui::Button(g, startupButton, settings.working.startup ? L"☑ 开机自启动（直接进入托盘）" : L"☐ 开机自启动（直接进入托盘）",
+    ui::Toggle(g, hwnd, startupButton, L"开机自启动（直接进入托盘）",
         settings.working.startup, ui::Inside(settings.mouse, startupButton));
     ui::Text(g, L"仅对当前用户生效；移动 EXE 后请重新保存设置。", {24, 595, 452, 24}, 12, ui::muted);
     ui::Text(g, L"配置文件：" + settings.configFile.wstring(), {24, 624, 452, 40}, 11, ui::muted);
     ui::Text(g, settings.notice, {24, 676, 452, 60}, 12, ui::danger);
-    ui::Button(g, saveButton, L"保存设置", true, ui::Inside(settings.mouse, saveButton));
-    ui::Button(g, cancelButton, L"取消", false, ui::Inside(settings.mouse, cancelButton));
+    ui::Button(g, hwnd, saveButton, L"保存设置", true, ui::Inside(settings.mouse, saveButton));
+    ui::Button(g, hwnd, cancelButton, L"取消", false, ui::Inside(settings.mouse, cancelButton));
 }
 void Cancel() { HideSettings(); PostMessageW(settings.owner, WM_SHOW_PANEL, 0, 0); }
 LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (ui::MotionMessage(hwnd, msg, wparam, lparam)) return 0;
     switch (msg) {
     case WM_PAINT: DrawSettings(hwnd); return 0;
     case WM_PRINTCLIENT: DrawSettings(hwnd, reinterpret_cast<HDC>(wparam)); return 0;

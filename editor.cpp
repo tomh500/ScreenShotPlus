@@ -18,6 +18,7 @@ const array<wstring, 7> colorNames{L"赤", L"橙", L"黄", L"绿", L"青", L"蓝
 struct Editor {
     HWND window = nullptr;
     unique_ptr<Bitmap> source;
+    ui::ImageCache imageCache;
     vector<Annotation> annotations;
     vector<vector<Annotation>> history;
     Annotation live, draft;
@@ -129,7 +130,7 @@ void AddText(const wstring& text) {
     editor.notice.clear(); Refresh();
 }
 void Cancel() {
-    ShowWindow(editor.window, SW_HIDE); editor.source.reset(); editor.annotations.clear(); editor.history.clear();
+    ShowWindow(editor.window, SW_HIDE); editor.imageCache.Reset(); editor.source.reset(); editor.annotations.clear(); editor.history.clear();
     editor.textActive = editor.drawing = editor.pressing = false;
     if (GetCapture() == editor.window) ReleaseCapture();
     if (editor.cancel) editor.cancel();
@@ -139,7 +140,7 @@ void Save() {
     CommitText(); FinishStroke();
     auto result = RenderAnnotations(*editor.source, editor.annotations, editor.notice);
     if (result && editor.save && editor.save(result, editor.notice)) {
-        ShowWindow(editor.window, SW_HIDE); editor.source.reset(); editor.annotations.clear(); editor.history.clear();
+        ShowWindow(editor.window, SW_HIDE); editor.imageCache.Reset(); editor.source.reset(); editor.annotations.clear(); editor.history.clear();
     }
     Refresh();
 }
@@ -147,20 +148,21 @@ void DrawEditor(HWND hwnd, HDC target = nullptr) {
     ui::Paint paint(hwnd, target); Graphics g(paint.buffer); ui::Prepare(g, hwnd);
     ui::Text(g, L"编辑截图", {24, 20, 200, 36}, 25, ui::foreground, true);
     ui::Text(g, L"原图保留，保存后回到缩略图继续拖动分享", {240, 28, 720, 26}, 13, ui::muted);
-    ui::Button(g, closeButton, L"×", false, ui::Inside(editor.mouse, closeButton));
-    const auto button = [&](RectF r, const wstring& text, bool active = false) { ui::Button(g, r, text, active, ui::Inside(editor.mouse, r)); };
+    ui::Button(g, hwnd, closeButton, L"×", false, ui::Inside(editor.mouse, closeButton));
+    const auto button = [&](RectF r, const wstring& text, bool active = false) { ui::Button(g, hwnd, r, text, active, ui::Inside(editor.mouse, r)); };
     button(penButton, L"画笔", editor.tool == Annotation::Stroke); button(textButton, L"文字", editor.tool == Annotation::Text);
     button(smallerButton, L"−"); button(largerButton, L"+");
     ui::Text(g, (editor.tool == Annotation::Stroke ? L"粗细 " : L"字号 ") + to_wstring(static_cast<int>(editor.tool == Annotation::Stroke ? editor.penSize : editor.textSize)) + L" px",
         {302, 85, 116, 26}, 14);
     button(undoButton, L"撤销"); button(commitButton, L"完成文字", editor.textActive);
     for (int i = 0; i < 7; ++i) {
-        const auto r = Swatch(i); ui::Round(g, r, 8, colors[i]);
+        auto r = Swatch(i);
+        const auto motion = ui::AnimateControl(hwnd, r, ui::Inside(editor.mouse, r), editor.color.GetValue() == colors[i].GetValue());
+        r.Inflate(-motion.press, -motion.press); ui::Round(g, r, 8, colors[i]);
         const bool light = i >= 1 && i <= 4;
         ui::Text(g, colorNames[i], {r.X + 21, r.Y + 8, 30, 28}, 15, light ? ui::background : ui::foreground, true);
-        if (editor.color.GetValue() == colors[i].GetValue()) {
-            Pen outline(ui::foreground, 2); g.DrawRectangle(&outline, RectF(r.X - 3, r.Y - 3, r.Width + 6, r.Height + 6));
-        }
+        ui::Border(g, {r.X - 3, r.Y - 3, r.Width + 6, r.Height + 6}, 10,
+            Color(static_cast<BYTE>(motion.selected * 255 + (1 - motion.selected) * motion.hover * 140), 240, 245, 250));
     }
     ui::Round(g, {580, 124, 42, 40}, 8, editor.color);
     ui::Text(g, L"当前颜色", {634, 133, 180, 26}, 13, ui::muted); button(rgbButton, L"RGB 自定义颜色", editor.rgb);
@@ -168,7 +170,7 @@ void DrawEditor(HWND hwnd, HDC target = nullptr) {
     if (editor.source) {
         const auto r = ImageRect();
         const auto saved = g.Save(); g.SetClip(r);
-        g.SetInterpolationMode(InterpolationModeHighQualityBicubic); g.DrawImage(editor.source.get(), r);
+        editor.imageCache.Draw(g, hwnd, *editor.source, r);
         g.TranslateTransform(r.X, r.Y); const float scale = r.Width / editor.source->GetWidth(); g.ScaleTransform(scale, scale);
         g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
         for (int i = 0; i < static_cast<int>(editor.annotations.size()); ++i) if (i != editor.editing) DrawAnnotation(g, editor.annotations[i]);
@@ -188,7 +190,10 @@ void DrawEditor(HWND hwnd, HDC target = nullptr) {
         {24, 677, 992, 26}, 12, editor.notice.empty() ? ui::muted : ui::danger);
     ui::Text(g, L"画笔和字号均按原图像素保存", {24, 714, 630, 24}, 12, ui::muted);
     button(cancelButton, L"取消"); button(saveButton, L"保存并返回", true);
-    if (editor.rgb) {
+    const auto paletteMotion = ui::AnimateControl(hwnd, palette, false, editor.rgb);
+    if (editor.rgb || paletteMotion.selected > 0.001f) {
+        const auto saved = g.Save();
+        g.SetClip(RectF(palette.X - 1, palette.Y - 1, palette.Width + 2, (palette.Height + 2) * paletteMotion.selected), CombineModeIntersect);
         ui::Round(g, palette, 12, ui::background);
         ui::Text(g, L"RGB 0–255 · 拖动或用方向键微调", {716, 188, 284, 26}, 12);
         for (int i = 0; i < 3; ++i) {
@@ -201,9 +206,11 @@ void DrawEditor(HWND hwnd, HDC target = nullptr) {
             ui::Text(g, to_wstring(value), {942, r.Y + 14, 56, 26}, 10, ui::muted);
         }
         ui::Text(g, L"再次点击 RGB 按钮关闭调色板", {716, 364, 284, 24}, 11, ui::muted);
+        g.Restore(saved);
     }
 }
 LRESULT CALLBACK EditorProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (ui::MotionMessage(hwnd, msg, wparam, lparam)) return 0;
     switch (msg) {
     case WM_PAINT: DrawEditor(hwnd); return 0;
     case WM_PRINTCLIENT: DrawEditor(hwnd, reinterpret_cast<HDC>(wparam)); return 0;
@@ -340,7 +347,7 @@ bool ShowEditor(Bitmap& image, wstring& error) {
     if (!editor.window) { error = L"编辑窗口尚未初始化。"; return false; }
     auto copy = RenderAnnotations(image, {}, error);
     if (!copy) return false;
-    editor.source = move(copy); editor.annotations.clear(); editor.history.clear(); editor.live = {}; editor.draft = {};
+    editor.imageCache.Reset(); editor.source = move(copy); editor.annotations.clear(); editor.history.clear(); editor.live = {}; editor.draft = {};
     editor.textActive = editor.drawing = editor.pressing = editor.rgb = editor.composing = false;
     editor.editing = editor.slider = -1; editor.tool = Annotation::Stroke; editor.color = colors[0];
     editor.penSize = 4; editor.textSize = 28; editor.notice.clear();
@@ -351,5 +358,5 @@ void FocusEditor() { if (EditorVisible()) { SetForegroundWindow(editor.window); 
 bool EditorVisible() { return editor.window && IsWindowVisible(editor.window); }
 void DestroyEditor() {
     if (editor.window) { DestroyWindow(editor.window); editor.window = nullptr; }
-    editor.source.reset(); editor.annotations.clear(); editor.history.clear(); editor.save = {}; editor.cancel = {};
+    editor.imageCache.Reset(); editor.source.reset(); editor.annotations.clear(); editor.history.clear(); editor.save = {}; editor.cancel = {};
 }

@@ -149,19 +149,20 @@ void DrawPanel(HWND hwnd, HDC target = nullptr) {
     ui::Round(g, {24, 24, 40, 40}, 12, ui::accent);
     ui::Text(g, L"S", {35, 29, 30, 34}, 24, ui::background, true);
     ui::Text(g, L"ScreenShotPlus", {78, 27, 278, 36}, 23, ui::foreground, true);
-    ui::Button(g, closeButton, L"×", false, ui::Inside(app.mouse, closeButton));
+    ui::Button(g, hwnd, closeButton, L"×", false, ui::Inside(app.mouse, closeButton));
     ui::Text(g, L"截取 · 保存 · 拖动分享", {24, 92, 372, 28}, 17);
-    ui::Text(g, L"v1.1.3", {328, 98, 68, 22}, 12, ui::accent);
+    ui::Text(g, L"v1.2.0", {328, 98, 68, 22}, 12, ui::accent);
     ui::Text(g, app.notice, {24, 128, 372, 40}, 12, ui::muted);
     const array<wstring, 5> labels{L"开始区域截图   " + HotkeyText(app.config), L"显示最新截图",
         L"打开保存目录", L"设置", L"退出程序"};
     for (size_t i = 0; i < buttons.size(); ++i)
-        ui::Button(g, buttons[i], labels[i], i == 0, ui::Inside(app.mouse, buttons[i]));
-    if (app.pending) ui::Button(g, retryButton, L"重试保存未保存的截图", false, ui::Inside(app.mouse, retryButton));
+        ui::Button(g, hwnd, buttons[i], labels[i], i == 0, ui::Inside(app.mouse, buttons[i]));
+    if (app.pending) ui::Button(g, hwnd, retryButton, L"重试保存未保存的截图", false, ui::Inside(app.mouse, retryButton));
     ui::Text(g, app.tray.registered ? L"关闭此面板后，程序仍在托盘运行" : L"托盘不可用，面板会保留；可在上方退出程序",
         {24, 530, 372, 24}, 12, ui::muted);
 }
 LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (ui::MotionMessage(hwnd, message, wparam, lparam)) return 0;
     if (app.taskbarCreated && message == app.taskbarCreated) { app.tray.registered = false; AddTray(); return 0; }
     switch (message) {
     case WM_PAINT: DrawPanel(hwnd); return 0;

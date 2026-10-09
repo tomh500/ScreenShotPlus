@@ -1,14 +1,52 @@
 #include "ui.h"
+#include <new>
 using namespace std;
 using namespace Gdiplus;
 namespace ui {
+namespace {
+constexpr wchar_t bufferProperty[] = L"ScreenShotPlus.PaintBuffer";
+struct PaintBuffer {
+    HDC dc = nullptr;
+    HBITMAP bitmap = nullptr;
+    HGDIOBJ old = nullptr;
+    int width = 0, height = 0;
+    ~PaintBuffer() {
+        if (old) SelectObject(dc, old);
+        if (bitmap) DeleteObject(bitmap);
+        if (dc) DeleteDC(dc);
+    }
+};
+void RoundedPath(GraphicsPath& path, RectF r, float radius) {
+    const float d = max(0.1f, min(radius * 2, min(r.Width, r.Height)));
+    path.AddArc(r.X, r.Y, d, d, 180, 90);
+    path.AddArc(r.GetRight() - d, r.Y, d, d, 270, 90);
+    path.AddArc(r.GetRight() - d, r.GetBottom() - d, d, d, 0, 90);
+    path.AddArc(r.X, r.GetBottom() - d, d, d, 90, 90); path.CloseFigure();
+}
+Color Mix(Color a, Color b, float t) {
+    const auto mix = [t](BYTE x, BYTE y) { return static_cast<BYTE>(clamp(lround(x + (y - x) * t), 0L, 255L)); };
+    return Color(mix(a.GetA(), b.GetA()), mix(a.GetR(), b.GetR()), mix(a.GetG(), b.GetG()), mix(a.GetB(), b.GetB()));
+}
+}
 Paint::Paint(HWND hwnd, HDC target) : window(hwnd), printing(target != nullptr) {
+    BeginMotionPaint(hwnd);
     dc = target ? target : BeginPaint(window, &ps);
     RECT r{}; GetClientRect(window, &r);
     width = max(1L, r.right); height = max(1L, r.bottom);
+    auto saved = static_cast<PaintBuffer*>(GetPropW(hwnd, bufferProperty));
+    if (saved && (saved->width != width || saved->height != height)) { ReleasePaintBuffer(hwnd); saved = nullptr; }
+    if (saved) { buffer = saved->dc; bitmap = saved->bitmap; old = saved->old; cached = true; return; }
     buffer = CreateCompatibleDC(dc);
     bitmap = CreateCompatibleBitmap(dc, width, height);
-    if (buffer && bitmap) old = SelectObject(buffer, bitmap);
+    if (buffer && bitmap) {
+        old = SelectObject(buffer, bitmap);
+        auto next = GetPropW(hwnd, L"ScreenShotPlus.Motion") ? new (std::nothrow) PaintBuffer : nullptr;
+        if (next) {
+            next->dc = buffer; next->bitmap = bitmap; next->old = old; next->width = width; next->height = height;
+            if (SetPropW(hwnd, bufferProperty, next)) cached = true;
+            else { next->dc = nullptr; next->bitmap = nullptr; next->old = nullptr; delete next; }
+        }
+    }
     else {
         if (bitmap) DeleteObject(bitmap);
         if (buffer) DeleteDC(buffer);
@@ -16,11 +54,23 @@ Paint::Paint(HWND hwnd, HDC target) : window(hwnd), printing(target != nullptr) 
     }
 }
 Paint::~Paint() {
+    // Soft reveal blends the finished frame, including text and images. The
+    // hit rectangles and image pixel coordinates remain stationary.
+    const float entrance = Entrance(window);
+    if (entrance < 1) {
+        Graphics g(buffer);
+        SolidBrush veil(Color(static_cast<BYTE>((1 - entrance) * 230), background.GetR(), background.GetG(), background.GetB()));
+        g.FillRectangle(&veil, 0, 0, width, height);
+    }
     if (bitmap) {
         BitBlt(dc, 0, 0, width, height, buffer, 0, 0, SRCCOPY);
-        SelectObject(buffer, old); DeleteObject(bitmap); DeleteDC(buffer);
+        if (!cached) { SelectObject(buffer, old); DeleteObject(bitmap); DeleteDC(buffer); }
     }
     if (!printing) EndPaint(window, &ps);
+    EndMotionPaint(window);
+}
+void ReleasePaintBuffer(HWND hwnd) {
+    delete static_cast<PaintBuffer*>(RemovePropW(hwnd, bufferProperty));
 }
 float Scale(HWND hwnd) {
     const auto fitted = reinterpret_cast<UINT_PTR>(GetPropW(hwnd, L"ScreenShotPlus.UiScale"));
@@ -41,23 +91,69 @@ void Text(Graphics& g, const wstring& text, RectF r, float size, Color color, bo
 }
 void Round(Graphics& g, RectF r, float radius, Color color) {
     GraphicsPath path;
-    const float d = min(radius * 2, min(r.Width, r.Height));
-    path.AddArc(r.X, r.Y, d, d, 180, 90);
-    path.AddArc(r.GetRight() - d, r.Y, d, d, 270, 90);
-    path.AddArc(r.GetRight() - d, r.GetBottom() - d, d, d, 0, 90);
-    path.AddArc(r.X, r.GetBottom() - d, d, d, 90, 90);
-    path.CloseFigure(); SolidBrush brush(color); g.FillPath(&brush, &path);
+    RoundedPath(path, r, radius); SolidBrush brush(color); g.FillPath(&brush, &path);
 }
-void Button(Graphics& g, RectF r, const wstring& text, bool primary, bool hovered) {
-    Round(g, r, 10, primary ? accent : (hovered ? Color(255, 47, 61, 76) : surface));
+void Border(Graphics& g, RectF r, float radius, Color color) {
+    GraphicsPath path; RoundedPath(path, r, radius); Pen pen(color, 1); g.DrawPath(&pen, &path);
+}
+void ClipRound(Graphics& g, RectF r, float radius) {
+    GraphicsPath path; RoundedPath(path, r, radius); g.SetClip(&path, CombineModeIntersect);
+}
+void Button(Graphics& g, HWND hwnd, RectF r, const wstring& text, bool primary, bool hovered) {
+    const auto motion = AnimateControl(hwnd, r, hovered, primary);
+    const float insetPress = motion.press * min(1.4f, r.Width * 0.009f);
+    r.Inflate(-insetPress, -insetPress);
+    const auto hoverColor = text == L"×" ? Color(255, 184, 56, 63) : Color(255, 56, 65, 78);
+    const auto fill = Mix(Mix(surface, hoverColor, motion.hover),
+        Mix(accent, Color(255, 163, 245, 213), motion.hover * 0.35f), motion.selected);
+    RectF shadow = r; shadow.Y += 1 + motion.hover * 1.2f;
+    Round(g, shadow, 8, Color(static_cast<BYTE>(18 + motion.hover * 15), 0, 0, 0));
+    Round(g, r, 8, Mix(fill, background, motion.press * 0.12f));
+    Border(g, {r.X + 0.5f, r.Y + 0.5f, r.Width - 1, r.Height - 1}, 8,
+        Mix(Color(255, 65, 73, 85), Color(255, 169, 247, 219), motion.selected * 0.60f + motion.hover * 0.25f));
     const float inset = r.Width < 64 ? 6.0f : 16.0f;
     Text(g, text, {r.X + inset, r.Y + (r.Height - 22) / 2, r.Width - inset * 2, 24},
-        14, primary ? background : foreground, primary);
+        14, Mix(foreground, background, motion.selected), primary);
+}
+void Toggle(Graphics& g, HWND hwnd, RectF r, const wstring& text, bool enabled, bool hovered) {
+    const auto motion = AnimateControl(hwnd, r, hovered, enabled);
+    Round(g, r, 8, Mix(surface, Color(255, 53, 61, 73), motion.hover));
+    Border(g, {r.X + 0.5f, r.Y + 0.5f, r.Width - 1, r.Height - 1}, 8, Color(255, 65, 73, 85));
+    Text(g, text, {r.X + 16, r.Y + (r.Height - 22) / 2, r.Width - 92, 24}, 14);
+    const RectF track{r.GetRight() - 60, r.Y + (r.Height - 22) / 2, 42, 22};
+    Round(g, track, 11, Mix(Color(255, 76, 85, 98), accent, motion.selected));
+    const float diameter = 14 + motion.press * 2;
+    const float x = track.X + 4 + motion.selected * (track.Width - 22);
+    SolidBrush thumb(Mix(foreground, background, motion.selected));
+    g.FillEllipse(&thumb, x - motion.press, track.Y + (22 - diameter) / 2, diameter, diameter);
+}
+void ImageCache::Draw(Graphics& g, HWND hwnd, Bitmap& image, RectF rect) {
+    const float scale = Scale(hwnd);
+    const int w = max(1, static_cast<int>(ceil(rect.Width * scale))), h = max(1, static_cast<int>(ceil(rect.Height * scale)));
+    if (source != &image || !bitmap || bitmap->GetWidth() != static_cast<UINT>(w) || bitmap->GetHeight() != static_cast<UINT>(h)) {
+        Reset();
+        auto next = make_unique<Bitmap>(w, h, PixelFormat32bppPARGB);
+        if (next->GetLastStatus() == Ok) {
+            Graphics cache(next.get()); cache.Clear(Color(0, 0, 0, 0));
+            cache.SetInterpolationMode(InterpolationModeHighQualityBicubic); cache.SetPixelOffsetMode(PixelOffsetModeHalf);
+            ImageAttributes attributes; attributes.SetWrapMode(WrapModeTileFlipXY);
+            if (cache.DrawImage(&image, Rect(0, 0, w, h), 0, 0, static_cast<INT>(image.GetWidth()),
+                static_cast<INT>(image.GetHeight()), UnitPixel, &attributes) == Ok) { bitmap = move(next); source = &image; }
+        }
+    }
+    g.SetInterpolationMode(InterpolationModeBilinear);
+    if (bitmap) g.DrawImage(bitmap.get(), rect, 0, 0, static_cast<REAL>(bitmap->GetWidth()), static_cast<REAL>(bitmap->GetHeight()), UnitPixel);
+    else g.DrawImage(&image, rect);
 }
 void Prepare(Graphics& g, HWND hwnd) {
     g.Clear(background); g.SetSmoothingMode(SmoothingModeAntiAlias);
     g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
     const auto s = Scale(hwnd); g.ScaleTransform(s, s);
+    RECT r{}; GetClientRect(hwnd, &r);
+    const float width = r.right / s, height = r.bottom / s;
+    LinearGradientBrush wash(PointF(0, 0), PointF(width, height), Color(255, 32, 40, 49), background);
+    g.FillRectangle(&wash, 0.0f, 0.0f, width, height);
+    Border(g, {0.5f, 0.5f, width - 1, height - 1}, 10, Color(255, 63, 72, 85));
 }
 float FitScale(HWND hwnd, int width, int height, const RECT& work) {
     const float native = static_cast<float>(GetDpiForWindow(hwnd)) / 96.0f;
@@ -93,6 +189,8 @@ void DpiChanged(HWND hwnd, LPARAM value, int width, int height) {
 }
 void Corners(HWND hwnd) {
     const DWORD rounded = 2; DwmSetWindowAttribute(hwnd, 33, &rounded, sizeof(rounded));
+    const BOOL dark = TRUE; DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark));
+    const COLORREF border = RGB(63, 72, 85); DwmSetWindowAttribute(hwnd, 34, &border, sizeof(border));
 }
 filesystem::path KnownFolder(REFKNOWNFOLDERID id) {
     PWSTR value = nullptr;

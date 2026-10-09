@@ -6,6 +6,7 @@ namespace {
 struct Preview {
     HWND window = nullptr;
     Bitmap* image = nullptr;
+    ui::ImageCache thumbnail;
     filesystem::path file;
     POINT mouse{-1, -1}, pressed{};
     bool pressing = false, dragging = false;
@@ -16,19 +17,27 @@ const RectF closeButton{278, 12, 28, 28}, imageRect{16, 52, 288, 166};
 void DrawPreview(HWND hwnd, HDC target = nullptr) {
     ui::Paint paint(hwnd, target); Graphics g(paint.buffer); ui::Prepare(g, hwnd);
     ui::Text(g, L"已保存 PNG", {16, 17, 240, 26}, 14, ui::accent, true);
-    ui::Button(g, closeButton, L"×", false, ui::Inside(preview.mouse, closeButton));
+    ui::Button(g, hwnd, closeButton, L"×", false, ui::Inside(preview.mouse, closeButton));
     ui::Round(g, imageRect, 10, ui::surface);
+    const auto motion = ui::AnimateControl(hwnd, imageRect, ui::Inside(preview.mouse, imageRect));
     if (preview.image) {
         const float scale = min(imageRect.Width / preview.image->GetWidth(), imageRect.Height / preview.image->GetHeight());
         const float w = preview.image->GetWidth() * scale, h = preview.image->GetHeight() * scale;
-        g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-        g.DrawImage(preview.image, RectF(imageRect.X + (imageRect.Width - w) / 2,
+        const auto saved = g.Save(); ui::ClipRound(g, imageRect, 10);
+        const float zoom = 1 + motion.hover * 0.012f - motion.press * 0.008f;
+        const float cx = imageRect.X + imageRect.Width / 2, cy = imageRect.Y + imageRect.Height / 2;
+        g.TranslateTransform(cx, cy); g.ScaleTransform(zoom, zoom); g.TranslateTransform(-cx, -cy);
+        preview.thumbnail.Draw(g, hwnd, *preview.image, RectF(imageRect.X + (imageRect.Width - w) / 2,
             imageRect.Y + (imageRect.Height - h) / 2, w, h));
+        g.Restore(saved);
     }
+    ui::Border(g, imageRect, 10, Color(static_cast<BYTE>(70 + motion.hover * 150),
+        ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()));
     ui::Text(g, L"单击编辑 · 拖动到聊天窗口或文件夹", {16, 231, 288, 24}, 12);
     ui::Text(g, preview.file.filename().wstring(), {16, 259, 288, 22}, 10, ui::muted);
 }
 LRESULT CALLBACK PreviewProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (ui::MotionMessage(hwnd, msg, wparam, lparam)) return 0;
     switch (msg) {
     case WM_PAINT: DrawPreview(hwnd); return 0;
     case WM_PRINTCLIENT: DrawPreview(hwnd, reinterpret_cast<HDC>(wparam)); return 0;
@@ -102,11 +111,12 @@ bool InitPreview(HINSTANCE instance, function<void()> drag, function<void()> edi
 }
 void ShowPreview(Bitmap* image, const filesystem::path& file, POINT point, unsigned seconds) {
     if (!preview.window || !image) return;
-    preview.image = image; preview.file = file; preview.pressing = false;
+    preview.thumbnail.Reset(); preview.image = image; preview.file = file; preview.pressing = false;
     preview.remaining = static_cast<ULONGLONG>(seconds) * 1000; preview.lastTick = GetTickCount64();
     KillTimer(preview.window, 1);
     if (seconds) SetTimer(preview.window, 1, 100, nullptr);
     ui::Place(preview.window, 320, 294, true, point);
+    ui::RestartMotion(preview.window);
     ShowWindow(preview.window, SW_SHOWNOACTIVATE); InvalidateRect(preview.window, nullptr, FALSE);
 }
 void HidePreview() {
@@ -118,5 +128,5 @@ void HidePreview() {
 bool PreviewVisible() { return preview.window && IsWindowVisible(preview.window); }
 void DestroyPreview() {
     if (preview.window) { KillTimer(preview.window, 1); DestroyWindow(preview.window); preview.window = nullptr; }
-    preview.image = nullptr; preview.drag = {}; preview.edit = {};
+    preview.thumbnail.Reset(); preview.image = nullptr; preview.drag = {}; preview.edit = {};
 }

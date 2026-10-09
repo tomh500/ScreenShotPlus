@@ -9,7 +9,10 @@ struct Config {
 };
 Config DefaultConfig();
 std::filesystem::path ConfigFile();
+std::filesystem::path PortableConfigFile();
 bool ValidConfig(const Config& config);
 Config LoadConfig(const std::filesystem::path& file, std::wstring& warning);
 bool SaveConfig(const std::filesystem::path& file, const Config& config, std::wstring& error);
+bool SaveConfigWithFallback(const std::filesystem::path& file, const std::filesystem::path& fallback,
+    const Config& config, std::filesystem::path& savedFile, std::wstring& error);
 std::wstring HotkeyText(const Config& config);

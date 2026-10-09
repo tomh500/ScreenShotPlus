@@ -24,10 +24,12 @@ try {
         $taskDist = Join-Path $taskRoot 'dist\ScreenShotPlus'
         New-Item -ItemType Directory -Force -Path $taskDist | Out-Null
         Copy-Item -LiteralPath (Join-Path $taskRoot 'x64\Release\ScreenShotPlus.exe') -Destination $taskDist
+        $taskPackageFiles = @((Join-Path $taskDist 'ScreenShotPlus.exe'))
         foreach ($taskDoc in @('README.md', 'THIRD_PARTY_NOTICES.md', 'VERIFICATION.md')) {
             Copy-Item -LiteralPath (Join-Path $taskRoot $taskDoc) -Destination $taskDist
+            $taskPackageFiles += Join-Path $taskDist $taskDoc
         }
-        Compress-Archive -LiteralPath $taskDist -DestinationPath (Join-Path $taskRoot 'dist\ScreenShotPlus-x64.zip') -Force
+        Compress-Archive -LiteralPath $taskPackageFiles -DestinationPath (Join-Path $taskRoot 'dist\ScreenShotPlus-x64.zip') -Force
         Write-Output "发布目录：$taskDist"
     }
 } finally { Pop-Location }

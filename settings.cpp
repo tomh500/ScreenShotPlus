@@ -10,11 +10,12 @@ struct Settings {
     POINT mouse{-1, -1}, pressed{};
     bool listening = false, mouseDown = false;
     wstring notice;
+    filesystem::path configFile;
 } settings;
 const RectF closeButton{452, 16, 28, 28}, folderButton{24, 180, 452, 44},
     hotkeyButton{24, 272, 452, 44}, printButton{24, 336, 452, 44},
     secondsButton{24, 450, 452, 44}, startupButton{24, 542, 452, 44},
-    saveButton{24, 652, 218, 44}, cancelButton{254, 652, 222, 44};
+    saveButton{24, 746, 218, 44}, cancelButton{254, 746, 222, 44};
 void DrawSettings(HWND hwnd, HDC target = nullptr) {
     ui::Paint paint(hwnd, target); Graphics g(paint.buffer); ui::Prepare(g, hwnd);
     ui::Text(g, L"设置 · v1.1.1", {24, 25, 390, 40}, 25, ui::foreground, true);
@@ -36,7 +37,8 @@ void DrawSettings(HWND hwnd, HDC target = nullptr) {
     ui::Button(g, startupButton, settings.working.startup ? L"☑ 开机自启动（直接进入托盘）" : L"☐ 开机自启动（直接进入托盘）",
         settings.working.startup, ui::Inside(settings.mouse, startupButton));
     ui::Text(g, L"仅对当前用户生效；移动 EXE 后请重新保存设置。", {24, 595, 452, 24}, 12, ui::muted);
-    ui::Text(g, settings.notice, {24, 620, 452, 30}, 12, ui::danger);
+    ui::Text(g, L"配置文件：" + settings.configFile.wstring(), {24, 624, 452, 40}, 11, ui::muted);
+    ui::Text(g, settings.notice, {24, 676, 452, 60}, 12, ui::danger);
     ui::Button(g, saveButton, L"保存设置", true, ui::Inside(settings.mouse, saveButton));
     ui::Button(g, cancelButton, L"取消", false, ui::Inside(settings.mouse, cancelButton));
 }
@@ -112,7 +114,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
         }
         return 0;
     case WM_DPICHANGED: {
-        ui::DpiChanged(hwnd, lparam, 500, 720); return 0;
+        ui::DpiChanged(hwnd, lparam, 500, 812); return 0;
     }
     }
     return DefWindowProcW(hwnd, msg, wparam, lparam);
@@ -125,15 +127,19 @@ bool InitSettings(HINSTANCE instance, HWND owner, function<bool(const Config&, w
     if (!GetClassInfoExW(instance, cls.lpszClassName, &existing) && !RegisterClassExW(&cls)) return false;
     settings.owner = owner; settings.apply = move(apply);
     settings.window = CreateWindowExW(WS_EX_TOOLWINDOW, cls.lpszClassName, L"ScreenShotPlus 设置", WS_POPUP,
-        0, 0, 500, 720, owner, nullptr, instance, nullptr);
+        0, 0, 500, 812, owner, nullptr, instance, nullptr);
     if (settings.window) ui::Corners(settings.window);
     return settings.window != nullptr;
 }
 void ShowSettings(const Config& config) {
     if (!settings.window) return;
     if (!SettingsVisible()) { settings.working = config; settings.listening = false; settings.notice.clear(); }
-    ui::Place(settings.window, 500, 720); ShowWindow(settings.window, SW_SHOW);
+    ui::Place(settings.window, 500, 812); ShowWindow(settings.window, SW_SHOW);
     SetForegroundWindow(settings.window); SetFocus(settings.window); InvalidateRect(settings.window, nullptr, FALSE);
+}
+void SetSettingsConfigFile(const filesystem::path& file) {
+    settings.configFile = file;
+    if (settings.window) InvalidateRect(settings.window, nullptr, FALSE);
 }
 void HideSettings() { if (settings.window) { settings.listening = false; ShowWindow(settings.window, SW_HIDE); } }
 void RecordSettingsHotkey(const Config& config) {

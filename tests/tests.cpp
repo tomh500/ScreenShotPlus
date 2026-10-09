@@ -225,6 +225,52 @@ void Configuration(const filesystem::path& root) {
     Check(StartupCommand(L"C:\\便携 工具\\ScreenShotPlus.exe", error) == L"\"C:\\便携 工具\\ScreenShotPlus.exe\" --tray", "startup command quotes Unicode spaced paths");
     Check(StartupCommand(filesystem::path(L"C:\\" + wstring(260, L'a') + L".exe"), error).empty(), "oversized Run command rejected");
 }
+void ConfigurationFallback(const filesystem::path& root, const filesystem::path& executable) {
+    Config config = DefaultConfig(); config.folder = root / L"fallback-images"; config.previewSeconds = 61;
+    const auto primary = root / L"blocked" / L"config.json", fallback = root / L"portable" / L"config.json";
+    filesystem::path destination; wstring error, warning;
+    Check(SaveConfigWithFallback(primary, fallback, config, destination, error) && destination == fallback && error.empty(),
+        "unwritable preferred config falls back to portable config");
+    Check(LoadConfig(destination, warning).previewSeconds == 61 && warning.empty(), "fallback persists chosen settings");
+    destination = root / L"unchanged.json";
+    Check(!SaveConfigWithFallback(primary, root / L"blocked" / L"fallback.json", config, destination, error) && destination.filename() == L"unchanged.json",
+        "both failed destinations preserve active config path");
+    Check(error.find(primary.wstring()) != wstring::npos && error.find(L"错误") != wstring::npos, "config failure names actual path and error");
+    const auto ordinary = root / L"preferred" / L"config.json";
+    Check(SaveConfigWithFallback(ordinary, fallback, config, destination, error) && destination == ordinary, "writable preferred config remains preferred");
+
+    const auto folder = root / L"portable-restart";
+    filesystem::create_directories(folder);
+    const auto childFile = folder / L"ConfigProbe.exe";
+    filesystem::copy_file(executable, childFile);
+    Check(SaveConfig(folder / L"ScreenShotPlus-data" / L"config.json", config, error), "restart portable config fixture");
+    wstring command = L"\"" + childFile.wstring() + L"\" --config-location-probe";
+    STARTUPINFOW startup{sizeof(startup)}; startup.dwFlags = STARTF_USESHOWWINDOW; startup.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION child{};
+    Check(CreateProcessW(childFile.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &child), "launch portable config restart child");
+    const DWORD waited = WaitForSingleObject(child.hProcess, 5000);
+    if (waited != WAIT_OBJECT_0) TerminateProcess(child.hProcess, 95);
+    DWORD code = 0; GetExitCodeProcess(child.hProcess, &code); CloseHandle(child.hThread); CloseHandle(child.hProcess);
+    Check(waited == WAIT_OBJECT_0 && code == 74, "next process reads portable config next to its executable");
+
+    // Probe a fresh, owned sibling directory; never touch the user's real config.
+    const auto local = ui::KnownFolder(FOLDERID_LocalAppData);
+    if (!local.empty()) {
+        const auto probe = local / (L"ScreenShotPlus-Probe-" + to_wstring(GetCurrentProcessId()));
+        error_code ec;
+        const bool created = filesystem::create_directory(probe, ec);
+        if (ec) {
+            Check(SaveConfigWithFallback(probe / L"config.json", root / L"native-fallback" / L"config.json", config, destination, error) &&
+                destination == root / L"native-fallback" / L"config.json", "real LocalAppData denial still permits portable save");
+            cout << "PASS real LocalAppData create denial (error " << ec.value() << ") / portable save\n";
+        } else if (created) {
+            const bool saved = SaveConfig(probe / L"config.json", config, error);
+            if (probe.parent_path() == local && probe.filename() == L"ScreenShotPlus-Probe-" + to_wstring(GetCurrentProcessId())) filesystem::remove_all(probe, ec);
+            Check(saved && !ec, "owned LocalAppData probe saved and removed");
+            cout << "PASS real LocalAppData write access\n";
+        }
+    }
+}
 filesystem::path PngStorage(const filesystem::path& root) {
     Bitmap image(17, 23, PixelFormat32bppRGB);
     { Graphics g(&image); g.Clear(Color(255, 13, 101, 203)); }
@@ -328,6 +374,16 @@ void EditorUi(HINSTANCE instance, const filesystem::path& root) {
     Check(saved->GetWidth() == 1984 && saved->GetHeight() == 828 && pixel.GetR() == 255 && pixel.GetG() == 0,
         "scaled-down canvas maps annotation to original physical pixels");
     DestroyEditor();
+}
+void SettingsFailureUi(HINSTANCE instance, const filesystem::path& root) {
+    const auto file = root / L"blocked" / L"config.json";
+    Check(InitSettings(instance, nullptr, [&](const Config& config, wstring& error) { return SaveConfig(file, config, error); }), "settings failure fixture");
+    SetSettingsConfigFile(file);
+    Config config = DefaultConfig(); config.folder = root / L"settings-error-images";
+    ShowSettings(config);
+    HWND hwnd = OwnWindow(L"ScreenShotPlus.Settings"); Click(hwnd, 100, 768);
+    Check(SettingsVisible(), "save failure keeps settings available");
+    Snapshot(hwnd, root / L"settings-error-ui"); DestroySettings();
 }
 void WritePermissions(const filesystem::path& root) {
     const auto folder = root / (L"permission-test-" + to_wstring(GetTickCount64()));
@@ -507,8 +563,14 @@ void HotkeyTransactions(HINSTANCE instance, const filesystem::path& root) {
     Check(ApplyConfiguredSettings(window, state, current, next, file, error, startup.key.c_str()) && !current.startup,
         "disable startup saves configuration");
     Check(ReadStartupEntry(startup.key.c_str(), restored, error) && !restored.exists, "disable removes only application entry");
+    next.key = VK_F21;
+    filesystem::path portableFile;
+    Check(ApplyConfiguredSettings(window, state, current, next, root / L"blocked" / L"config.json", error,
+        startup.key.c_str(), root / L"hotkey-portable" / L"config.json", &portableFile), "config fallback commits new hotkey only after persistence");
+    Check(current.key == VK_F21 && LoadConfig(portableFile, warning).key == VK_F21 && ProbeHotkey(current.modifiers, VK_F22),
+        "fallback persistence and hotkey state agree");
     ReleaseHotkeys(window, state); DestroyWindow(window);
-    Check(ProbeHotkey(current.modifiers, VK_F22), "shutdown releases hotkey");
+    Check(ProbeHotkey(current.modifiers, VK_F21), "shutdown releases hotkey");
 }
 bool AppSmoke(HINSTANCE instance, const filesystem::path& artifacts, bool isolated = false) {
     TestStartupKey startupKey;
@@ -561,7 +623,7 @@ bool AppSmoke(HINSTANCE instance, const filesystem::path& artifacts, bool isolat
             HWND settings = OwnWindow(L"ScreenShotPlus.Settings");
             Check(settings && IsWindowVisible(settings), "settings opens");
             Snapshot(settings, artifacts / L"settings-ui");
-            Click(settings, 100, 472); Click(settings, 100, 674);
+            Click(settings, 100, 472); Click(settings, 100, 768);
             this_thread::sleep_for(chrono::milliseconds(100));
             wstring warning;
             Check(!IsWindowVisible(settings) && LoadConfig(file, warning).previewSeconds == 5, "UI settings persisted");
@@ -615,8 +677,69 @@ bool AppSmoke(HINSTANCE instance, const filesystem::path& artifacts, bool isolat
     observer.join(); Check(ok, "app startup / settings / exit");
     return true;
 }
+void ExecutableSmoke(const filesystem::path& executable) {
+    HANDLE running = OpenMutexW(SYNCHRONIZE, FALSE, INSTANCE_MUTEX);
+    if (running) { CloseHandle(running); cout << "SKIP standalone EXE smoke: an existing user instance owns the mutex\n"; return; }
+    STARTUPINFOW startup{sizeof(startup)}; startup.dwFlags = STARTF_USESHOWWINDOW; startup.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION first{};
+    wstring command = L"\"" + executable.wstring() + L"\" --tray";
+    Check(CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &first), "launch actual release EXE");
+    struct Cleanup {
+        PROCESS_INFORMATION process;
+        ~Cleanup() {
+            if (WaitForSingleObject(process.hProcess, 0) == WAIT_TIMEOUT) PostThreadMessageW(process.dwThreadId, WM_QUIT, 0, 0);
+            if (WaitForSingleObject(process.hProcess, 5000) != WAIT_OBJECT_0) TerminateProcess(process.hProcess, 95);
+            CloseHandle(process.hThread); CloseHandle(process.hProcess);
+        }
+    } cleanup{first};
+    HWND panel = nullptr;
+    const ULONGLONG deadline = GetTickCount64() + 5000;
+    while (!panel && GetTickCount64() < deadline) {
+        struct Search { DWORD pid; HWND window = nullptr; } search{first.dwProcessId};
+        EnumWindows([](HWND hwnd, LPARAM param) -> BOOL {
+            auto& search = *reinterpret_cast<Search*>(param);
+            DWORD pid = 0; GetWindowThreadProcessId(hwnd, &pid);
+            if (pid == search.pid && GetPropW(hwnd, INSTANCE_PANEL_MARKER) && GetPropW(hwnd, L"ScreenShotPlus.Ready")) {
+                search.window = hwnd; return FALSE;
+            }
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&search));
+        panel = search.window;
+        if (!panel) Sleep(25);
+    }
+    Check(panel != nullptr && WaitForSingleObject(first.hProcess, 0) == WAIT_TIMEOUT, "actual EXE initializes and remains alive");
+    const bool tray = GetPropW(panel, L"ScreenShotPlus.TrayRegistered") != nullptr;
+    if (tray) {
+        NOTIFYICONIDENTIFIER id{sizeof(id)}; id.hWnd = panel; id.uID = 1; RECT rect{};
+        Check(SUCCEEDED(Shell_NotifyIconGetRect(&id, &rect)) && rect.right > rect.left, "actual EXE tray has Shell rectangle");
+        cout << "PASS actual EXE notification icon registration / rectangle\n";
+    } else {
+        Check(IsWindowVisible(panel), "actual EXE stays accessible when Shell rejects icon");
+        cout << "SKIP actual EXE tray acceptance: Shell rejected registration; accessible failure panel confirmed\n";
+    }
+    for (const bool quiet : {true, false}) {
+        command = L"\"" + executable.wstring() + L"\"" + (quiet ? L" --tray" : L"");
+        PROCESS_INFORMATION duplicate{};
+        Check(CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &duplicate), "launch actual EXE duplicate");
+        const DWORD waited = WaitForSingleObject(duplicate.hProcess, 5000);
+        if (waited != WAIT_OBJECT_0) TerminateProcess(duplicate.hProcess, 95);
+        DWORD code = 0; GetExitCodeProcess(duplicate.hProcess, &code);
+        CloseHandle(duplicate.hThread); CloseHandle(duplicate.hProcess);
+        Check(waited == WAIT_OBJECT_0 && code == 0 && WaitForSingleObject(first.hProcess, 0) == WAIT_TIMEOUT,
+            "actual duplicate EXE exits and preserves primary");
+        if (quiet && tray) Check(!IsWindowVisible(panel), "duplicate tray launch does not show panel");
+        if (!quiet) Check(IsWindowVisible(panel), "duplicate manual launch activates primary panel");
+    }
+    PostThreadMessageW(first.dwThreadId, WM_QUIT, 0, 0);
+    Check(WaitForSingleObject(first.hProcess, 5000) == WAIT_OBJECT_0, "actual EXE shuts down gracefully");
+    cout << "PASS actual EXE startup / duplicate manual and tray launch / graceful shutdown\n";
+}
 }
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && wstring_view(argv[1]) == L"--config-location-probe") {
+        wstring warning;
+        return ConfigFile() == PortableConfigFile() && LoadConfig(ConfigFile(), warning).previewSeconds == 61 && warning.empty() ? 74 : 94;
+    }
     if (argc == 4 && wstring_view(argv[1]) == L"--instance-probe") {
         InstanceLock lock;
         if (!AcquireInstanceLock(lock, argv[2])) return 91;
@@ -643,6 +766,7 @@ int wmain(int argc, wchar_t** argv) {
         InstanceActivation(GetModuleHandleW(nullptr)); cout << "PASS delayed primary window / duplicate activation\n";
         TrayTransitions(); cout << "PASS simulated Shell failure / recovery / legacy event handling (not actual tray acceptance)\n";
         Configuration(root); cout << "PASS config round trip / corrupt and unwritable paths\n";
+        ConfigurationFallback(root, filesystem::absolute(argv[0])); cout << "PASS config fallback / detailed errors / real process portable restart\n";
         const auto file = PngStorage(root); cout << "PASS PNG pixels / Unicode paths / unique saves\n";
         FileTransfer(file); cout << "PASS Unicode file transfer / copy-only format\n";
         AnnotationPixels(root); cout << "PASS physical-pixel stroke / dot / Unicode text / edited PNG transfer\n";
@@ -653,9 +777,11 @@ int wmain(int argc, wchar_t** argv) {
         } else cout << "SKIP live capture and preview UI: --no-ui or existing application instance\n";
         HotkeyTransactions(GetModuleHandleW(nullptr), root); cout << "PASS real hotkey conflict / change / write-failure rollback\n";
         if (liveUi && AppSmoke(GetModuleHandleW(nullptr), root, isolatedUi))
-            cout << (isolatedUi ? "PASS isolated application tray startup / capture / edit / preview / state / shutdown (single-instance test skipped)\n" :
+            cout << (isolatedUi ? "PASS isolated application tray status handling / capture / edit / preview / state / shutdown (single-instance UI fixture skipped)\n" :
                 "PASS application capture / edit / persistence / state / single instance / shutdown\n");
         else cout << "SKIP application UI smoke: --no-ui or existing application instance\n";
+        if (liveUi) ExecutableSmoke(filesystem::current_path() / L"x64" / L"Release" / L"ScreenShotPlus.exe");
+        if (liveUi) { SettingsFailureUi(GetModuleHandleW(nullptr), root); cout << "PASS actual settings save error / visible config path\n"; }
         cout << "Monitors actually present: " << GetSystemMetrics(SM_CMONITORS) << '\n';
         wcout << L"Test artifacts: " << root.wstring() << L'\n';
     } catch (const exception& e) { cerr << "FAIL: " << e.what() << '\n'; code = 1; }

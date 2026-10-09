@@ -11,7 +11,8 @@ wstring RegisterConfiguredHotkeys(HWND window, Hotkeys& state, const Config& con
     return warning;
 }
 bool ApplyConfiguredSettings(HWND window, Hotkeys& state, Config& current, const Config& next,
-    const filesystem::path& file, wstring& error, const wchar_t* startupKey) {
+    const filesystem::path& file, wstring& error, const wchar_t* startupKey,
+    const filesystem::path& fallback, filesystem::path* savedFile) {
     if (!ValidConfig(next)) { error = L"设置无效，请重新选择目录或快捷键。"; return false; }
     const bool newPrimary = !state.primaryRegistered || next.key != current.key || next.modifiers != current.modifiers;
     const bool newPrint = next.printScreen && !state.printRegistered;
@@ -27,7 +28,8 @@ bool ApplyConfiguredSettings(HWND window, Hotkeys& state, Config& current, const
     const bool changeStartup = next.startup || next.startup != current.startup;
     const bool startupRead = !changeStartup || ReadStartupEntry(startupKey, previous, error);
     const bool startupSet = startupRead && (!changeStartup || SetStartup(startupKey, next.startup, error));
-    const bool saved = startupSet && SaveConfig(file, next, error);
+    filesystem::path destination;
+    const bool saved = startupSet && SaveConfigWithFallback(file, fallback, next, destination, error);
     if (!saved) {
         if (startupSet && changeStartup) {
             wstring rollback;
@@ -43,6 +45,7 @@ bool ApplyConfiguredSettings(HWND window, Hotkeys& state, Config& current, const
     }
     if (state.printRegistered && !next.printScreen) UnregisterHotKey(window, 2);
     state.printRegistered = next.printScreen; current = next;
+    if (savedFile) *savedFile = move(destination);
     return true;
 }
 void ReleaseHotkeys(HWND window, const Hotkeys& state) {

@@ -25,6 +25,7 @@ struct App {
     bool mouseDown = false;
     Config config;
     filesystem::path configFile;
+    bool allowPortableConfig = true;
     wstring startupKey;
     Hotkeys hotkeys;
     bool exiting = false;
@@ -118,7 +119,10 @@ void CancelEdit() {
     app.phase = App::Idle; LatestPreview();
 }
 bool ApplyConfig(const Config& next, wstring& error) {
-    if (!ApplyConfiguredSettings(app.panel, app.hotkeys, app.config, next, app.configFile, error, app.startupKey.c_str())) return false;
+    filesystem::path destination;
+    if (!ApplyConfiguredSettings(app.panel, app.hotkeys, app.config, next, app.configFile, error, app.startupKey.c_str(),
+        app.allowPortableConfig ? PortableConfigFile() : filesystem::path{}, &destination)) return false;
+    app.configFile = move(destination); SetSettingsConfigFile(app.configFile);
     if (PreviewVisible()) LatestPreview();
     return true;
 }
@@ -153,7 +157,8 @@ void DrawPanel(HWND hwnd, HDC target = nullptr) {
     for (size_t i = 0; i < buttons.size(); ++i)
         ui::Button(g, buttons[i], labels[i], i == 0, ui::Inside(app.mouse, buttons[i]));
     if (app.pending) ui::Button(g, retryButton, L"重试保存未保存的截图", false, ui::Inside(app.mouse, retryButton));
-    ui::Text(g, L"关闭此面板后，程序仍在托盘运行", {24, 530, 372, 24}, 12, ui::muted);
+    ui::Text(g, app.tray.registered ? L"关闭此面板后，程序仍在托盘运行" : L"托盘不可用，面板会保留；可在上方退出程序",
+        {24, 530, 372, 24}, 12, ui::muted);
 }
 LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     if (app.taskbarCreated && message == app.taskbarCreated) { app.tray.registered = false; AddTray(); return 0; }
@@ -174,7 +179,7 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
         return 0;
     case WM_SETTINGS_SAVED:
         if (app.pending) SavePending();
-        else Notice(L"设置已保存，下次启动仍然有效。");
+        else Notice(L"设置已保存，下次启动仍然有效。配置：" + app.configFile.wstring());
         return 0;
     case WM_MOUSEMOVE: {
         app.mouse = ui::Mouse(hwnd, lparam);
@@ -232,6 +237,7 @@ int RunApp(HINSTANCE instance, const filesystem::path& configFile, bool trayStar
     app.instance = instance;
     app.startupKey = startupKey;
     app.configFile = configFile.empty() ? ConfigFile() : configFile;
+    app.allowPortableConfig = configFile.empty();
     wstring warning; app.config = LoadConfig(app.configFile, warning);
     if (!warning.empty()) app.notice = warning;
     app.taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
@@ -247,6 +253,7 @@ int RunApp(HINSTANCE instance, const filesystem::path& configFile, bool trayStar
         !InitEditor(instance, app.panel, SaveEdited, CancelEdit)) {
         DestroyWindow(app.panel); return 7;
     }
+    SetSettingsConfigFile(app.configFile);
     ui::Corners(app.panel);
     app.smallIcon = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_SMALL), IMAGE_ICON,
         GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem()), GetSystemMetricsForDpi(SM_CYSMICON, GetDpiForSystem()), LR_DEFAULTCOLOR));

@@ -9,6 +9,8 @@
 #include "dragdrop.h"
 #include "hotkeys.h"
 #include "editor.h"
+#include "tray.h"
+#include "instance.h"
 using namespace std;
 using namespace Gdiplus;
 namespace {
@@ -16,7 +18,8 @@ struct App {
     enum Phase { Idle, Selecting, Saving, Dragging, Editing } phase = Idle;
     HINSTANCE instance = nullptr;
     HWND panel = nullptr;
-    NOTIFYICONDATAW tray{sizeof(tray)};
+    TrayIcon tray;
+    HICON smallIcon = nullptr;
     wstring notice = L"截图后自动保存，拖动缩略图即可分享。";
     POINT mouse{-1, -1}, pressed{};
     bool mouseDown = false;
@@ -35,6 +38,8 @@ const array<RectF, 5> buttons{{{24, 172, 372, 52}, {24, 236, 372, 44},
     {24, 292, 372, 44}, {24, 348, 372, 44}, {24, 404, 372, 44}}};
 const RectF closeButton{372, 16, 28, 28};
 const RectF retryButton{24, 460, 372, 44};
+constexpr UINT_PTR trayRetryTimer = 4;
+const wstring trayFailure = L"托盘注册失败，正在重试。请保留此面板，或退出后从资源管理器重新启动。";
 void ShowPanel() {
     if (app.exiting) return;
     if (app.phase == App::Editing) { FocusEditor(); return; }
@@ -118,8 +123,21 @@ bool ApplyConfig(const Config& next, wstring& error) {
     return true;
 }
 void AddTray() {
-    Shell_NotifyIconW(NIM_ADD, &app.tray); app.tray.uVersion = NOTIFYICON_VERSION_4;
-    Shell_NotifyIconW(NIM_SETVERSION, &app.tray);
+    if (RegisterTrayIcon(app.tray)) {
+        SetPropW(app.panel, L"ScreenShotPlus.TrayRegistered", reinterpret_cast<HANDLE>(1));
+        KillTimer(app.panel, trayRetryTimer);
+        if (app.notice == trayFailure) app.notice = L"托盘已恢复，关闭面板后可继续截图。";
+    } else {
+        RemovePropW(app.panel, L"ScreenShotPlus.TrayRegistered");
+        SetTimer(app.panel, trayRetryTimer, 2000, nullptr);
+        app.notice = trayFailure;
+        if (!app.exiting && app.phase == App::Idle && !SettingsVisible()) ShowPanel();
+    }
+    InvalidateRect(app.panel, nullptr, FALSE);
+}
+void HidePanel() {
+    AddTray(); if (!app.tray.registered) return;
+    ShowWindow(app.panel, SW_HIDE);
 }
 void DrawPanel(HWND hwnd, HDC target = nullptr) {
     ui::Paint paint(hwnd, target); Graphics g(paint.buffer); ui::Prepare(g, hwnd);
@@ -128,6 +146,7 @@ void DrawPanel(HWND hwnd, HDC target = nullptr) {
     ui::Text(g, L"ScreenShotPlus", {78, 27, 278, 36}, 23, ui::foreground, true);
     ui::Button(g, closeButton, L"×", false, ui::Inside(app.mouse, closeButton));
     ui::Text(g, L"截取 · 保存 · 拖动分享", {24, 92, 372, 28}, 17);
+    ui::Text(g, L"v1.1.1", {328, 98, 68, 22}, 12, ui::accent);
     ui::Text(g, app.notice, {24, 128, 372, 40}, 12, ui::muted);
     const array<wstring, 5> labels{L"开始区域截图   " + HotkeyText(app.config), L"显示最新截图",
         L"打开保存目录", L"设置", L"退出程序"};
@@ -137,15 +156,16 @@ void DrawPanel(HWND hwnd, HDC target = nullptr) {
     ui::Text(g, L"关闭此面板后，程序仍在托盘运行", {24, 530, 372, 24}, 12, ui::muted);
 }
 LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
-    if (app.taskbarCreated && message == app.taskbarCreated) { AddTray(); return 0; }
+    if (app.taskbarCreated && message == app.taskbarCreated) { app.tray.registered = false; AddTray(); return 0; }
     switch (message) {
     case WM_PAINT: DrawPanel(hwnd); return 0;
     case WM_PRINTCLIENT: DrawPanel(hwnd, reinterpret_cast<HDC>(wparam)); return 0;
     case WM_ERASEBKGND: return 1;
-    case WM_SHOW_PANEL: ShowPanel(); return 0;
-    case WM_CLOSE: ShowWindow(hwnd, SW_HIDE); return 0;
+    case WM_SHOW_PANEL: AddTray(); ShowPanel(); return 0;
+    case WM_CLOSE: HidePanel(); return 0;
+    case WM_TIMER: if (wparam == trayRetryTimer) AddTray(); return 0;
     case WM_TRAY:
-        if (LOWORD(lparam) == NIN_SELECT || LOWORD(lparam) == NIN_KEYSELECT || LOWORD(lparam) == WM_CONTEXTMENU) ShowPanel();
+        if (TrayEventOpensPanel(lparam)) ShowPanel();
         return 0;
     case WM_HOTKEY:
         if (SettingsVisible()) {
@@ -177,7 +197,7 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
         if (GetCapture() == hwnd) ReleaseCapture();
         if (!clicked) return 0;
         const POINT p = ui::Mouse(hwnd, lparam);
-        if (ui::Inside(p, closeButton) && ui::Inside(down, closeButton)) { ShowWindow(hwnd, SW_HIDE); return 0; }
+        if (ui::Inside(p, closeButton) && ui::Inside(down, closeButton)) { HidePanel(); return 0; }
         if (app.pending && ui::Inside(p, retryButton) && ui::Inside(down, retryButton)) { SavePending(); return 0; }
         for (size_t i = 0; i < buttons.size(); ++i) if (ui::Inside(p, buttons[i]) && ui::Inside(down, buttons[i])) {
             if (i == 0) StartCapture();
@@ -192,16 +212,18 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
         }
         return 0;
     }
-    case WM_KEYDOWN: if (wparam == VK_ESCAPE) ShowWindow(hwnd, SW_HIDE); return 0;
+    case WM_KEYDOWN: if (wparam == VK_ESCAPE) HidePanel(); return 0;
     case WM_DPICHANGED: {
         ui::DpiChanged(hwnd, lparam, 420, 570);
         return 0;
     }
     case WM_DESTROY:
         app.exiting = true; CancelSelection();
-        Shell_NotifyIconW(NIM_DELETE, &app.tray);
+        KillTimer(hwnd, trayRetryTimer); RemoveTrayIcon(app.tray);
         ReleaseHotkeys(hwnd, app.hotkeys);
-        DestroyEditor(); DestroySettings(); DestroyPreview(); app.latest.reset(); app.pending.reset(); PostQuitMessage(0); return 0;
+        DestroyEditor(); DestroySettings(); DestroyPreview(); app.latest.reset(); app.pending.reset();
+        if (app.smallIcon) { DestroyIcon(app.smallIcon); app.smallIcon = nullptr; }
+        PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(hwnd, message, wparam, lparam);
 }
@@ -220,18 +242,22 @@ int RunApp(HINSTANCE instance, const filesystem::path& configFile, bool trayStar
     app.panel = CreateWindowExW(WS_EX_TOOLWINDOW, PANEL_CLASS, L"ScreenShotPlus", WS_POPUP,
         0, 0, 420, 520, nullptr, nullptr, instance, nullptr);
     if (!app.panel) return 5;
+    if (configFile.empty()) SetPropW(app.panel, INSTANCE_PANEL_MARKER, reinterpret_cast<HANDLE>(1));
     if (!InitPreview(instance, DragLatest, EditLatest) || !InitSettings(instance, app.panel, ApplyConfig) ||
         !InitEditor(instance, app.panel, SaveEdited, CancelEdit)) {
         DestroyWindow(app.panel); return 7;
     }
     ui::Corners(app.panel);
-    app.tray.hWnd = app.panel; app.tray.uID = 1;
-    app.tray.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
-    app.tray.uCallbackMessage = WM_TRAY; app.tray.hIcon = cls.hIcon;
-    wcscpy_s(app.tray.szTip, L"ScreenShotPlus · 区域截图与拖动分享"); AddTray();
+    app.smallIcon = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_SMALL), IMAGE_ICON,
+        GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem()), GetSystemMetricsForDpi(SM_CYSMICON, GetDpiForSystem()), LR_DEFAULTCOLOR));
+    app.tray.data.hWnd = app.panel; app.tray.data.uID = 1;
+    app.tray.data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+    app.tray.data.uCallbackMessage = WM_TRAY; app.tray.data.hIcon = app.smallIcon ? app.smallIcon : cls.hIcon;
+    wcscpy_s(app.tray.data.szTip, L"ScreenShotPlus · 区域截图与拖动分享"); AddTray();
     const auto hotkeyWarning = RegisterConfiguredHotkeys(app.panel, app.hotkeys, app.config);
     if (!hotkeyWarning.empty()) app.notice += L" " + hotkeyWarning;
     if (!trayStartup) ShowPanel();
+    SetPropW(app.panel, L"ScreenShotPlus.Ready", reinterpret_cast<HANDLE>(1));
     MSG message{}; BOOL result;
     while ((result = GetMessageW(&message, nullptr, 0, 0)) > 0) { TranslateMessage(&message); DispatchMessageW(&message); }
     if (IsWindow(app.panel)) DestroyWindow(app.panel);

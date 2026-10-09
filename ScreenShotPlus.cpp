@@ -1,20 +1,21 @@
 #include "app.h"
 #include "startup.h"
+#include "instance.h"
 int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
-    HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Local\\ScreenShotPlus.Singleton");
-    if (!mutex) return 1;
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        if (!TrayStartupRequested())
-            if (HWND panel = FindWindowW(PANEL_CLASS, nullptr)) PostMessageW(panel, WM_SHOW_PANEL, 0, 0);
-        CloseHandle(mutex); return 0;
+    InstanceLock lock;
+    if (!AcquireInstanceLock(lock)) return 1;
+    const bool tray = TrayStartupRequested();
+    if (!lock.first) {
+        if (!tray && !ActivateExistingInstance()) return 8;
+        return 0;
     }
     const HRESULT ole = OleInitialize(nullptr);
-    if (FAILED(ole)) { CloseHandle(mutex); return 2; }
+    if (FAILED(ole)) return 2;
     Gdiplus::GdiplusStartupInput input; ULONG_PTR token = 0;
     if (Gdiplus::GdiplusStartup(&token, &input, nullptr) != Gdiplus::Ok) {
-        OleUninitialize(); CloseHandle(mutex); return 3;
+        OleUninitialize(); return 3;
     }
-    const int result = RunApp(instance, {}, TrayStartupRequested());
-    Gdiplus::GdiplusShutdown(token); OleUninitialize(); CloseHandle(mutex);
+    const int result = RunApp(instance, {}, tray);
+    Gdiplus::GdiplusShutdown(token); OleUninitialize();
     return result;
 }

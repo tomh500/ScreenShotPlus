@@ -9,6 +9,8 @@
 #include "hotkeys.h"
 #include "annotation.h"
 #include "editor.h"
+#include "instance.h"
+#include "tray.h"
 #include <nlohmann/json.hpp>
 #include <atomic>
 #include <iostream>
@@ -82,6 +84,94 @@ void Geometry() {
     // Physical points on a virtual desktop whose origin is (-1920, -1080).
     r = SelectionRect({1700, 900}, {2300, 1300}, 3840, 2160);
     Check(r.left - 1920 == -220 && r.right - 1920 == 380 && r.bottom - r.top == 400, "cross-origin geometry");
+}
+vector<DWORD> notifyCalls;
+int notifyFailures = 0;
+bool failTrayVersion = false;
+BOOL WINAPI FakeNotify(DWORD operation, PNOTIFYICONDATAW) {
+    notifyCalls.push_back(operation);
+    if (operation == NIM_SETVERSION) return !failTrayVersion;
+    if (notifyFailures > 0) { --notifyFailures; return FALSE; }
+    return TRUE;
+}
+void TrayTransitions() {
+    TrayIcon tray;
+    notifyFailures = 2;
+    Check(!RegisterTrayIcon(tray, FakeNotify) && !tray.registered && !tray.modern, "failed tray registration is reported");
+    notifyCalls.clear();
+    Check(RegisterTrayIcon(tray, FakeNotify) && tray.registered && tray.modern &&
+        notifyCalls == vector<DWORD>{NIM_ADD, NIM_SETVERSION}, "tray recovery negotiates version after successful add");
+    notifyCalls.clear(); notifyFailures = 1;
+    Check(RegisterTrayIcon(tray, FakeNotify) && notifyCalls == vector<DWORD>{NIM_MODIFY, NIM_ADD, NIM_SETVERSION},
+        "lost tray icon can be re-added");
+    failTrayVersion = true;
+    Check(RegisterTrayIcon(tray, FakeNotify) && !tray.modern, "old tray event version remains usable");
+    failTrayVersion = false;
+    for (UINT message : {NIN_SELECT, NIN_KEYSELECT, WM_CONTEXTMENU, WM_LBUTTONUP, WM_RBUTTONUP})
+        Check(TrayEventOpensPanel(MAKELPARAM(message, 1)), "modern and legacy tray click events recognized");
+    Check(!TrayEventOpensPanel(MAKELPARAM(WM_MOUSEMOVE, 1)), "tray hover does not open panel");
+}
+void InstanceProcesses(const filesystem::path& executable) {
+    const wstring suffix = to_wstring(GetCurrentProcessId()) + L"-" + to_wstring(GetTickCount64());
+    const wstring mutex = L"Local\\ScreenShotPlus.TestMutex-" + suffix, gateName = L"Local\\ScreenShotPlus.TestGate-" + suffix;
+    HANDLE gate = CreateEventW(nullptr, TRUE, FALSE, gateName.c_str());
+    Check(gate != nullptr, "instance fixture gate");
+    struct Children {
+        HANDLE gate; vector<PROCESS_INFORMATION> processes;
+        ~Children() {
+            SetEvent(gate);
+            for (auto& process : processes) {
+                if (WaitForSingleObject(process.hProcess, 5000) != WAIT_OBJECT_0) TerminateProcess(process.hProcess, 95);
+                CloseHandle(process.hThread); CloseHandle(process.hProcess);
+            }
+            CloseHandle(gate);
+        }
+    } children{gate, {}};
+    for (int i = 0; i < 8; ++i) {
+        wstring command = L"\"" + executable.wstring() + L"\" --instance-probe \"" + mutex + L"\" \"" + gateName + L"\"";
+        STARTUPINFOW startup{sizeof(startup)}; startup.dwFlags = STARTF_USESHOWWINDOW; startup.wShowWindow = SW_HIDE;
+        PROCESS_INFORMATION process{};
+        Check(CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &process), "start concurrent instance child");
+        children.processes.push_back(process);
+    }
+    int exited = 0;
+    const ULONGLONG deadline = GetTickCount64() + 5000;
+    while (GetTickCount64() < deadline) {
+        exited = 0;
+        for (const auto& process : children.processes) if (WaitForSingleObject(process.hProcess, 0) == WAIT_OBJECT_0) ++exited;
+        if (exited >= 7) break;
+        Sleep(20);
+    }
+    Check(exited == 7, "one instance remains alive while seven duplicates exit");
+    SetEvent(gate);
+    int first = 0, duplicate = 0;
+    for (const auto& process : children.processes) {
+        Check(WaitForSingleObject(process.hProcess, 5000) == WAIT_OBJECT_0, "instance child exits");
+        DWORD code = 0; GetExitCodeProcess(process.hProcess, &code);
+        if (code == 71) ++first; else if (code == 72) ++duplicate;
+    }
+    Check(first == 1 && duplicate == 7, "real concurrent processes share a single named mutex");
+    InstanceLock restarted;
+    Check(AcquireInstanceLock(restarted, mutex.c_str()) && restarted.first, "shutdown releases instance mutex");
+}
+LRESULT CALLBACK ActivationProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (msg == WM_SHOW_PANEL) { SetPropW(hwnd, L"Activated", reinterpret_cast<HANDLE>(1)); return 0; }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+void InstanceActivation(HINSTANCE instance) {
+    constexpr wchar_t name[] = L"ScreenShotPlus.TestActivation";
+    WNDCLASSW cls{}; cls.lpfnWndProc = ActivationProc; cls.hInstance = instance; cls.lpszClassName = name;
+    Check(RegisterClassW(&cls) != 0, "activation fixture class");
+    atomic<bool> delivered = false;
+    jthread duplicate([&] { delivered = ActivateExistingInstance(3000, name); });
+    Sleep(150);
+    HWND window = CreateWindowExW(0, name, L"Activation fixture", WS_POPUP, 0, 0, 10, 10, nullptr, nullptr, instance, nullptr);
+    Check(window != nullptr, "delayed primary window");
+    SetPropW(window, INSTANCE_PANEL_MARKER, reinterpret_cast<HANDLE>(1));
+    Pump(250); duplicate.join();
+    Check(delivered && GetPropW(window, L"Activated"), "duplicate activation waits for primary window to exist");
+    DestroyWindow(window);
+    Check(!ActivateExistingInstance(50, name), "missing primary window returns failure");
 }
 void FileTransfer(const filesystem::path& file);
 void AnnotationPixels(const filesystem::path& root) {
@@ -436,16 +526,27 @@ bool AppSmoke(HINSTANCE instance, const filesystem::path& artifacts, bool isolat
         for (int i = 0; i < 50 && !panel; ++i) {
             HWND candidate = OwnWindow(PANEL_CLASS);
             DWORD pid = 0; if (candidate) GetWindowThreadProcessId(candidate, &pid);
-            if (pid == GetCurrentProcessId() && (isolated || IsWindowVisible(candidate))) panel = candidate;
+            if (pid == GetCurrentProcessId() && GetPropW(candidate, L"ScreenShotPlus.Ready") && (isolated || IsWindowVisible(candidate))) panel = candidate;
             else this_thread::sleep_for(chrono::milliseconds(50));
         }
         try {
             Check(panel != nullptr, "app panel available");
             if (isolated) {
-                Check(!IsWindowVisible(panel), "tray startup does not show panel");
+                if (GetPropW(panel, L"ScreenShotPlus.TrayRegistered")) {
+                    Check(!IsWindowVisible(panel), "successful tray startup does not show panel");
+                    NOTIFYICONIDENTIFIER id{sizeof(id)}; id.hWnd = panel; id.uID = 1; RECT rect{};
+                    Check(SUCCEEDED(Shell_NotifyIconGetRect(&id, &rect)) && rect.right > rect.left, "registered icon has actual Shell rectangle");
+                    cout << "PASS real Shell tray registration / icon rectangle\n";
+                } else {
+                    Check(IsWindowVisible(panel), "failed tray startup preserves accessible panel");
+                    SendMessageW(panel, WM_CLOSE, 0, 0);
+                    Check(IsWindowVisible(panel), "panel refuses to hide when tray is unavailable");
+                    cout << "SKIP actual tray display: Shell rejected registration; failure panel / retry verified\n";
+                }
                 SendMessageW(panel, WM_SHOW_PANEL, 0, 0);
                 Check(IsWindowVisible(panel), "tray startup panel can be opened");
             } else {
+            SetPropW(panel, INSTANCE_PANEL_MARKER, reinterpret_cast<HANDLE>(1));
             const auto executable = filesystem::current_path() / L"x64" / L"Release" / L"ScreenShotPlus.exe";
             STARTUPINFOW startup{sizeof(startup)}; startup.dwFlags = STARTF_USESHOWWINDOW; startup.wShowWindow = SW_HIDE;
             PROCESS_INFORMATION child{};
@@ -516,6 +617,15 @@ bool AppSmoke(HINSTANCE instance, const filesystem::path& artifacts, bool isolat
 }
 }
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 4 && wstring_view(argv[1]) == L"--instance-probe") {
+        InstanceLock lock;
+        if (!AcquireInstanceLock(lock, argv[2])) return 91;
+        if (!lock.first) return 72;
+        HANDLE gate = OpenEventW(SYNCHRONIZE, FALSE, argv[3]);
+        if (!gate) return 92;
+        const DWORD waited = WaitForSingleObject(gate, 10000); CloseHandle(gate);
+        return waited == WAIT_OBJECT_0 ? 71 : 93;
+    }
     const bool isolatedUi = argc > 1 && wstring_view(argv[1]) == L"--isolated-ui";
     bool liveUi = !(argc > 1 && wstring_view(argv[1]) == L"--no-ui");
     HANDLE running = OpenMutexW(SYNCHRONIZE, FALSE, L"Local\\ScreenShotPlus.Singleton");
@@ -529,6 +639,9 @@ int wmain(int argc, wchar_t** argv) {
     try {
         filesystem::create_directories(root);
         Geometry(); cout << "PASS selection geometry\n";
+        InstanceProcesses(filesystem::absolute(argv[0])); cout << "PASS 8 concurrent processes / single-instance mutex / restart\n";
+        InstanceActivation(GetModuleHandleW(nullptr)); cout << "PASS delayed primary window / duplicate activation\n";
+        TrayTransitions(); cout << "PASS simulated Shell failure / recovery / legacy event handling (not actual tray acceptance)\n";
         Configuration(root); cout << "PASS config round trip / corrupt and unwritable paths\n";
         const auto file = PngStorage(root); cout << "PASS PNG pixels / Unicode paths / unique saves\n";
         FileTransfer(file); cout << "PASS Unicode file transfer / copy-only format\n";

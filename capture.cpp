@@ -22,8 +22,61 @@ struct Selection {
     RECT lastCapture{};
     POINT begin{}, end{};
     bool active = false, finishing = false;
+    bool layered = false;
+    int alpha = -1;
+    RECT chrome{};
+    POINT paintedPointer{};
     CaptureDone done;
 } selection;
+unsigned captureShade = 60;
+bool captureGuides = true, captureAnimation = true;
+
+RectF HintRect(float scale) {
+    POINT point{selection.end.x + selection.desktop.left, selection.end.y + selection.desktop.top};
+    MONITORINFO info{sizeof(info)}; GetMonitorInfoW(MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST), &info);
+    const float width = max(100.0f, min(464 * scale, static_cast<float>(info.rcWork.right - info.rcWork.left) - 24 * scale));
+    return {info.rcWork.left - selection.desktop.left + (info.rcWork.right - info.rcWork.left - width) / 2,
+        info.rcWork.top - selection.desktop.top + 24 * scale, width, 66 * scale};
+}
+RECT ChromeRect(HWND hwnd) {
+    const float s = ui::Scale(hwnd);
+    if (!selection.active) {
+        const auto hint = HintRect(s);
+        return {static_cast<LONG>(floor(hint.X - 8 * s)), static_cast<LONG>(floor(hint.Y - 24 * s)),
+            static_cast<LONG>(ceil(hint.GetRight() + 8 * s)), static_cast<LONG>(ceil(hint.GetBottom() + 8 * s))};
+    }
+    RECT r = SelectionRect(selection.begin, selection.end, selection.desktop.right - selection.desktop.left,
+        selection.desktop.bottom - selection.desktop.top);
+    const int desktopWidth = selection.desktop.right - selection.desktop.left, desktopHeight = selection.desktop.bottom - selection.desktop.top;
+    const float labelWidth = 252 * s, labelHeight = 42 * s;
+    const float x = clamp(static_cast<float>(r.left), 0.0f, max(0.0f, desktopWidth - labelWidth));
+    RECT label{};
+    // The pill can change sides while its 8 px reveal offset settles near
+    // the bottom edge. Include both endpoints to erase and repaint both sides.
+    for (const float offset : {0.0f, 8.0f}) {
+        float y = r.bottom + (10 + offset) * s;
+        if (y + labelHeight > desktopHeight) y = r.top - labelHeight - 10 * s;
+        y = clamp(y, 0.0f, max(0.0f, desktopHeight - labelHeight));
+        RECT endpoint{static_cast<LONG>(floor(x - 8 * s)), static_cast<LONG>(floor(y - 8 * s)),
+            static_cast<LONG>(ceil(x + labelWidth + 8 * s)), static_cast<LONG>(ceil(y + labelHeight + 8 * s))};
+        RECT combined{}; UnionRect(&combined, &label, &endpoint); label = combined;
+    }
+    const LONG margin = static_cast<LONG>(ceil(8 * s)); InflateRect(&r, margin, margin);
+    RECT result{}; UnionRect(&result, &r, &label); return result;
+}
+void InvalidateSelection(HWND hwnd) {
+    const RECT next = ChromeRect(hwnd);
+    if (selection.active || !EqualRect(&selection.chrome, &next)) {
+        InvalidateRect(hwnd, &selection.chrome, FALSE); InvalidateRect(hwnd, &next, FALSE);
+    }
+    if (captureGuides) {
+        const LONG gap = static_cast<LONG>(ceil(30 * ui::Scale(hwnd)));
+        RECT old{selection.paintedPointer.x - gap, selection.paintedPointer.y - gap,
+            selection.paintedPointer.x + gap, selection.paintedPointer.y + gap};
+        RECT current{selection.end.x - gap, selection.end.y - gap, selection.end.x + gap, selection.end.y + gap};
+        InvalidateRect(hwnd, &old, FALSE); InvalidateRect(hwnd, &current, FALSE);
+    }
+}
 
 void ClearImage() {
     selection.image.reset();
@@ -62,19 +115,34 @@ void Finish(bool accept, wstring error = {}) {
 }
 void DrawSelection(HWND hwnd, HDC target = nullptr) {
     ui::Paint paint(hwnd, target, false);
-    const float entrance = ui::Entrance(hwnd), scale = ui::Scale(hwnd);
-    BitBlt(paint.buffer, 0, 0, paint.width, paint.height, selection.dimDC, 0, 0, SRCCOPY);
-    if (entrance < 1) {
-        BLENDFUNCTION blend{AC_SRC_OVER, 0, static_cast<BYTE>((1 - entrance) * 255), 0};
-        AlphaBlend(paint.buffer, 0, 0, paint.width, paint.height, selection.frozenDC, 0, 0, paint.width, paint.height, blend);
+    const float entrance = captureAnimation ? ui::Entrance(hwnd) : 1, scale = ui::Scale(hwnd);
+    if (selection.layered) {
+        const int alpha = clamp(static_cast<int>(lround(entrance * 255)), 1, 255);
+        if (selection.alpha != alpha) {
+            if (SetLayeredWindowAttributes(hwnd, 0, static_cast<BYTE>(alpha), LWA_ALPHA)) selection.alpha = alpha;
+            else {
+                selection.layered = false; selection.alpha = 255;
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & ~WS_EX_LAYERED);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+        }
     }
+    // DWM composites the cached desktop fade. CPU work is bounded by the HUD
+    // and dirty selection area rather than blending the whole desktop each frame.
+    const RECT dirty = paint.printing ? RECT{0, 0, paint.width, paint.height} : paint.ps.rcPaint;
+    BitBlt(paint.buffer, dirty.left, dirty.top, dirty.right - dirty.left, dirty.bottom - dirty.top,
+        selection.dimDC, dirty.left, dirty.top, SRCCOPY);
     const RECT r = SelectionRect(selection.begin, selection.end, paint.width, paint.height);
     const int w = r.right - r.left, h = r.bottom - r.top;
-    if (selection.active && w > 0 && h > 0) BitBlt(paint.buffer, r.left, r.top, w, h, selection.frozenDC, r.left, r.top, SRCCOPY);
+    RECT crop{};
+    if (selection.active && w > 0 && h > 0 && IntersectRect(&crop, &r, &dirty))
+        BitBlt(paint.buffer, crop.left, crop.top, crop.right - crop.left, crop.bottom - crop.top,
+            selection.frozenDC, crop.left, crop.top, SRCCOPY);
     Graphics g(paint.buffer);
     g.SetSmoothingMode(SmoothingModeAntiAlias);
     g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
-    const float reveal = ui::AnimateValue(hwnd, 1, selection.active ? 1.0f : 0.0f, 0.18);
+    g.SetClip(Rect(dirty.left, dirty.top, dirty.right - dirty.left, dirty.bottom - dirty.top));
+    const float reveal = captureAnimation ? ui::AnimateValue(hwnd, 1, selection.active ? 1.0f : 0.0f, 0.18) : (selection.active ? 1.0f : 0.0f);
     if (selection.active && w > 0 && h > 0) {
         const RectF bounds{static_cast<float>(r.left), static_cast<float>(r.top), static_cast<float>(w - 1), static_cast<float>(h - 1)};
         Pen halo(Color(40, ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()), 6 * scale);
@@ -94,36 +162,39 @@ void DrawSelection(HWND hwnd, HDC target = nullptr) {
         y = clamp(y, 0.0f, max(0.0f, paint.height - labelHeight));
         ui::Round(g, {x, y + 2 * scale, labelWidth, labelHeight}, 12 * scale, Color(50, 0, 0, 0));
         ui::Round(g, {x, y, labelWidth, labelHeight}, 12 * scale, ui::background);
-        ui::Border(g, {x, y, labelWidth, labelHeight}, 12 * scale, Color(130, 105, 232, 187));
+        ui::Border(g, {x, y, labelWidth, labelHeight}, 12 * scale, Color(130, ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()));
         ui::Text(g, to_wstring(w) + L" × " + to_wstring(h) + L" px", {x + 14 * scale, y + 10 * scale,
             170 * scale, labelHeight}, 14 * scale, ui::accent, true);
         ui::Text(g, L"松开保存", {x + 172 * scale, y + 12 * scale, 72 * scale, 24 * scale}, 11 * scale, ui::muted);
     } else {
-        POINT point{selection.end.x + selection.desktop.left, selection.end.y + selection.desktop.top};
-        MONITORINFO info{sizeof(info)}; GetMonitorInfoW(MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST), &info);
-        const float width = min(464 * scale, static_cast<float>(info.rcWork.right - info.rcWork.left) - 24 * scale);
-        const float x = info.rcWork.left - selection.desktop.left + (info.rcWork.right - info.rcWork.left - width) / 2;
-        const float y = info.rcWork.top - selection.desktop.top + (24 - 14 * (1 - entrance)) * scale;
+        const auto hint = HintRect(scale);
+        const float width = hint.Width, x = hint.X, y = hint.Y - 14 * ui::MotionAmount() * (1 - entrance) * scale;
         const auto saved = g.Save();
         g.TranslateTransform(x + width / 2, y + 33 * scale);
-        const float spring = 0.94f + 0.06f * ui::SpringReveal(ui::EntranceProgress(hwnd));
+        const float amount = captureAnimation ? ui::MotionAmount() : 0;
+        const float spring = 1 - 0.06f * amount + 0.06f * amount * ui::SpringReveal(ui::EntranceProgress(hwnd));
         g.ScaleTransform(spring, spring); g.TranslateTransform(-width / 2, -33 * scale);
         ui::Round(g, {0, 3 * scale, width, 66 * scale}, 18 * scale, Color(60, 0, 0, 0));
         ui::Round(g, {0, 0, width, 66 * scale}, 18 * scale, ui::background);
-        ui::Border(g, {0, 0, width, 66 * scale}, 18 * scale, Color(130, 105, 232, 187));
+        ui::Border(g, {0, 0, width, 66 * scale}, 18 * scale, Color(130, ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()));
         ui::Round(g, {16 * scale, 17 * scale, 32 * scale, 32 * scale}, 9 * scale, ui::accent);
         ui::Text(g, L"＋", {19 * scale, 18 * scale, 30 * scale, 28 * scale}, 21 * scale, ui::background, true);
         ui::Text(g, L"选择你的截图区域", {62 * scale, 11 * scale, width - 74 * scale, 27 * scale}, 16 * scale, ui::foreground, true);
         ui::Text(g, L"拖动框选 · 松开保存 · Esc / 右键取消", {62 * scale, 37 * scale, width - 74 * scale, 23 * scale}, 11 * scale, ui::muted);
         g.Restore(saved);
-        const float cx = static_cast<float>(selection.end.x), cy = static_cast<float>(selection.end.y);
-        Pen guide(Color(48, 105, 232, 187), max(1.0f, scale));
-        g.DrawLine(&guide, 0.0f, cy, static_cast<float>(paint.width), cy);
-        g.DrawLine(&guide, cx, 0.0f, cx, static_cast<float>(paint.height));
-        Pen ring(Color(static_cast<BYTE>(entrance * 180), 105, 232, 187), 1.5f * scale);
-        const float radius = (8 + 12 * (1 - entrance)) * scale;
-        g.DrawEllipse(&ring, cx - radius, cy - radius, radius * 2, radius * 2);
+        if (captureGuides) {
+            const float cx = static_cast<float>(selection.end.x), cy = static_cast<float>(selection.end.y);
+            Pen guide(Color(110, ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()), max(1.0f, scale));
+            g.DrawLine(&guide, cx - 20 * scale, cy, cx - 11 * scale, cy);
+            g.DrawLine(&guide, cx + 11 * scale, cy, cx + 20 * scale, cy);
+            g.DrawLine(&guide, cx, cy - 20 * scale, cx, cy - 11 * scale);
+            g.DrawLine(&guide, cx, cy + 11 * scale, cx, cy + 20 * scale);
+            Pen ring(Color(180, ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()), 1.5f * scale);
+            g.DrawEllipse(&ring, cx - 8 * scale, cy - 8 * scale, 16 * scale, 16 * scale);
+        }
     }
+    selection.chrome = ChromeRect(hwnd); selection.paintedPointer = selection.end;
+    ui::MotionRegion(hwnd, &selection.chrome);
 }
 LRESULT CALLBACK SelectionProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     if (ui::MotionMessage(hwnd, msg, wparam, lparam)) return 0;
@@ -140,7 +211,7 @@ LRESULT CALLBACK SelectionProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam
     case WM_MOUSEMOVE:
         selection.end = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         ui::MotionMonitor(hwnd, MonitorFromPoint({selection.desktop.left + selection.end.x, selection.desktop.top + selection.end.y}, MONITOR_DEFAULTTONEAREST));
-        InvalidateRect(hwnd, nullptr, FALSE);
+        InvalidateSelection(hwnd);
         return 0;
     case WM_LBUTTONUP:
         if (selection.active) { selection.end = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)}; Finish(true); }
@@ -158,6 +229,9 @@ LRESULT CALLBACK SelectionProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam
     }
     return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
+}
+void ConfigureCapture(unsigned shade, bool guides, bool animate) {
+    captureShade = clamp(shade, 25u, 80u); captureGuides = guides; captureAnimation = animate;
 }
 bool BeginSelection(HINSTANCE instance, CaptureDone done, wstring& error) {
     if (selection.window) { error = L"已有截图正在进行。"; return false; }
@@ -197,7 +271,7 @@ bool BeginSelection(HINSTANCE instance, CaptureDone done, wstring& error) {
         !BitBlt(selection.dimDC, 0, 0, width, height, selection.frozenDC, 0, 0, SRCCOPY)) {
         ClearImage(); error = L"无法准备截图绘图缓冲，请重试。"; return false;
     }
-    { Graphics dim(selection.dimDC); SolidBrush shade(Color(155, 0, 0, 0)); dim.FillRectangle(&shade, 0, 0, width, height); }
+    { Graphics dim(selection.dimDC); SolidBrush shade(Color(static_cast<BYTE>(captureShade * 255 / 100), 0, 0, 0)); dim.FillRectangle(&shade, 0, 0, width, height); }
     WNDCLASSEXW cls{sizeof(cls)};
     cls.hInstance = instance; cls.lpfnWndProc = SelectionProc;
     cls.hCursor = LoadCursorW(nullptr, IDC_CROSS); cls.lpszClassName = L"ScreenShotPlus.Selection";
@@ -207,10 +281,17 @@ bool BeginSelection(HINSTANCE instance, CaptureDone done, wstring& error) {
     }
     selection.done = move(done); selection.begin = {}; selection.active = false; selection.lastCapture = {};
     GetCursorPos(&selection.end); selection.end.x -= x; selection.end.y -= y;
-    selection.window = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, cls.lpszClassName,
+    selection.layered = captureAnimation && ui::DecorativeMotion(); selection.alpha = -1; selection.chrome = {};
+    selection.window = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | (selection.layered ? WS_EX_LAYERED : 0), cls.lpszClassName,
         L"ScreenShotPlus 区域截图", WS_POPUP, x, y, width, height, nullptr, nullptr, instance, nullptr);
     if (!selection.window) { ClearImage(); selection.done = {}; error = L"无法创建框选窗口。"; return false; }
-    ShowWindow(selection.window, SW_SHOW); SetForegroundWindow(selection.window);
+    if (selection.layered && !SetLayeredWindowAttributes(selection.window, 0, 1, LWA_ALPHA)) {
+        selection.layered = false;
+        SetWindowLongPtrW(selection.window, GWL_EXSTYLE, GetWindowLongPtrW(selection.window, GWL_EXSTYLE) & ~WS_EX_LAYERED);
+    }
+    ShowWindow(selection.window, SW_SHOW);
+    ui::RestartMotion(selection.window, captureAnimation ? 0.26 : 0);
+    SetForegroundWindow(selection.window);
     POINT cursor{}; GetCursorPos(&cursor); ui::MotionMonitor(selection.window, MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST));
     SetFocus(selection.window); UpdateWindow(selection.window);
     return true;

@@ -20,6 +20,11 @@ struct MotionInfo {
 };
 double RefreshRate(HWND hwnd);
 double RefreshRateValue(UINT32 numerator, UINT32 denominator);
+void SetMotionOptions(unsigned level, unsigned speed);
+unsigned MotionLevel();
+float MotionAmount();
+double MotionDuration(double seconds);
+bool DecorativeMotion(unsigned minimum = 1);
 bool MotionMessage(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
 void RestartMotion(HWND hwnd, double seconds = 0.26);
 void BeginMotionPaint(HWND hwnd);
@@ -27,9 +32,11 @@ void EndMotionPaint(HWND hwnd);
 float Entrance(HWND hwnd);
 float EntranceProgress(HWND hwnd);
 float SpringReveal(float progress);
-float AnimateValue(HWND hwnd, unsigned key, float target, double seconds, float initial = 0);
+float AnimateValue(HWND hwnd, unsigned key, float target, double seconds, float initial = 0, bool always = false);
 void ContinuousMotion(HWND hwnd, bool active);
 void MotionMonitor(HWND hwnd, HMONITOR monitor);
+// Physical client pixels. A null region restores full-window invalidation.
+void MotionRegion(HWND hwnd, const RECT* region);
 Interaction AnimateControl(HWND hwnd, Gdiplus::RectF rect, bool hovered, bool selected = false);
 MotionInfo GetMotionInfo(HWND hwnd);
 }

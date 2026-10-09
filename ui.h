@@ -3,8 +3,11 @@
 #include "animation.h"
 namespace ui {
 inline const Gdiplus::Color background(255, 25, 29, 36), surface(255, 39, 44, 53);
-inline const Gdiplus::Color accent(255, 105, 232, 187), foreground(255, 240, 245, 250);
+inline Gdiplus::Color accent(255, 105, 232, 187);
+inline const Gdiplus::Color foreground(255, 240, 245, 250);
 inline const Gdiplus::Color muted(255, 163, 179, 195), danger(255, 255, 162, 149);
+Gdiplus::Color AccentColor(unsigned choice);
+void SetAccent(unsigned choice);
 struct Paint {
     HWND window;
     PAINTSTRUCT ps{};
@@ -38,7 +41,7 @@ struct ImageCache {
     void Draw(Gdiplus::Graphics& g, HWND hwnd, Gdiplus::Bitmap& image, Gdiplus::RectF rect);
 };
 void Prepare(Gdiplus::Graphics& g, HWND hwnd);
-void Place(HWND hwnd, int width, int height, bool corner = false, POINT point = {});
+void Place(HWND hwnd, int width, int height, bool corner = false, POINT point = {}, unsigned cornerIndex = 0);
 void DpiChanged(HWND hwnd, LPARAM rect, int width, int height);
 void Corners(HWND hwnd);
 std::filesystem::path KnownFolder(REFKNOWNFOLDERID id);

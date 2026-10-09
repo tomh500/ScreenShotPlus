@@ -8,3 +8,11 @@ void RecordSettingsHotkey(const Config& config);
 void HideSettings();
 bool SettingsVisible();
 void DestroySettings();
+struct SettingsState {
+    Config working;
+    unsigned tab = 0;
+    bool sliderDragging = false;
+    float sliderPosition = 0;
+    std::wstring title;
+};
+SettingsState GetSettingsState();

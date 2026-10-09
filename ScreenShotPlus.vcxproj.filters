@@ -7,6 +7,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="animation.cpp"><Filter>源文件</Filter></ClCompile>
+    <ClCompile Include="motion_selector.cpp"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="visual_effects.cpp"><Filter>源文件</Filter></ClCompile>
     <ClCompile Include="ScreenShotPlus.cpp">
       <Filter>源文件</Filter>
@@ -44,6 +45,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="animation.h"><Filter>头文件</Filter></ClInclude>
+    <ClInclude Include="motion_selector.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="visual_effects.h"><Filter>头文件</Filter></ClInclude>
     <ClInclude Include="framework.h">
       <Filter>头文件</Filter>

@@ -69,15 +69,16 @@ void Render(HWND hwnd, HDC print = nullptr) {
         else {
             // Time-based following, a short soft lag rather than a fixed
             // number of pixels per frame. Reduced motion follows directly.
-            const float follow = animated ? static_cast<float>(1 - exp(-55 * delta)) : 1;
+            const float follow = animated && ui::MotionLevel() >= 2 ? static_cast<float>(1 - exp(-55 * delta)) : 1;
             effect.current = Interpolate(effect.current, target, follow);
         }
-        const float desiredTilt = animated ? clamp((pointer.x - effect.pointer.x) * 0.16f, -3.5f, 3.5f) : 0;
+        const float desiredTilt = animated && ui::MotionLevel() >= 2 ?
+            clamp((pointer.x - effect.pointer.x) * 0.16f * ui::MotionAmount(), -3.5f * ui::MotionAmount(), 3.5f * ui::MotionAmount()) : 0;
         effect.tilt += (desiredTilt - effect.tilt) * static_cast<float>(1 - exp(-18 * delta));
         effect.pointer = pointer;
     } else if (effect.mode == Effect::Landing) {
         effect.current = Interpolate(effect.origin, effect.destination, eased);
-        effect.current.Y -= sin(progress * 3.14159265f) * 34 * effect.scale;
+        effect.current.Y -= sin(progress * 3.14159265f) * 34 * effect.scale * ui::MotionAmount();
         opacity = clamp((1 - progress) / 0.24f, 0.0f, 1.0f);
     } else if (effect.mode == Effect::Returning) {
         effect.current = Interpolate(effect.release, effect.origin, eased);
@@ -120,7 +121,24 @@ void Render(HWND hwnd, HDC print = nullptr) {
         g.Restore(saved);
         const float accepted = ui::AnimateValue(hwnd, 1, effect.feedback & DROPEFFECT_COPY ? 1.0f : 0.0f, 0.14);
         ui::Border(g, {-3 * s, -3 * s, w + 6 * s, h + 6 * s}, 14 * s,
-            Color(220, static_cast<BYTE>(92 + 13 * accepted), static_cast<BYTE>(106 + 126 * accepted), static_cast<BYTE>(122 + 65 * accepted)));
+            Color(220, static_cast<BYTE>(92 + (ui::accent.GetR() - 92) * accepted),
+                static_cast<BYTE>(106 + (ui::accent.GetG() - 106) * accepted), static_cast<BYTE>(122 + (ui::accent.GetB() - 122) * accepted)));
+        if (animated && ui::MotionLevel() >= 3) {
+            const float shine = static_cast<float>(fmod(now * 0.42, 1.0));
+            Pen rim(Color(110, ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()), 1.4f * s);
+            g.DrawLine(&rim, w * shine - 24 * s, -3 * s, min(w, w * shine + 24 * s), -3 * s);
+        }
+        if (animated && ui::MotionLevel() == 4) {
+            LinearGradientBrush premium(PointF(0, 0), PointF(w, 0), Color(220, 96, 134, 255), Color(230, 204, 148, 255));
+            Pen ribbon(&premium, 2.0f * s); g.DrawLine(&ribbon, 10 * s, -3 * s, max(10 * s, w - 10 * s), -3 * s);
+            for (int i = 0; i < 10; ++i) {
+                const float phase = static_cast<float>(fmod(now * 0.25 + i * 0.173, 1.0));
+                const float x = phase * w, y = -11 * s - (i % 3) * 4 * s;
+                const float light = sin(phase * 3.14159265f);
+                SolidBrush star(Color(static_cast<BYTE>(light * 180), 213, 186, 255));
+                g.FillEllipse(&star, x, y, (i % 3 ? 1.6f : 2.6f) * s, (i % 3 ? 1.6f : 2.6f) * s);
+            }
+        }
         if (effect.mode == Effect::Dragging) {
             const float badgeWidth = min(188 * s, w + 24 * s);
             const RectF badge{max(0.0f, (w - badgeWidth) / 2), h + 10 * s, badgeWidth, 30 * s};
@@ -161,6 +179,7 @@ LRESULT CALLBACK EffectProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
 }
 bool Start(Bitmap& image, RECT origin, RECT destination, Effect::Mode mode) {
     CancelVisualEffects();
+    if (!ui::DecorativeMotion(mode == Effect::Landing ? 2 : 1)) return false;
     if (image.GetWidth() == 0 || image.GetHeight() == 0 || origin.right <= origin.left || origin.bottom <= origin.top) return false;
     const HINSTANCE instance = GetModuleHandleW(nullptr);
     WNDCLASSEXW cls{sizeof(cls)}; cls.lpfnWndProc = EffectProc; cls.hInstance = instance; cls.lpszClassName = effectClass;

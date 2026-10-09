@@ -28,6 +28,12 @@ Color Mix(Color a, Color b, float t) {
     return Color(mix(a.GetA(), b.GetA()), mix(a.GetR(), b.GetR()), mix(a.GetG(), b.GetG()), mix(a.GetB(), b.GetB()));
 }
 }
+Color AccentColor(unsigned choice) {
+    const Color colors[]{Color(255, 105, 232, 187), Color(255, 92, 167, 255),
+        Color(255, 183, 139, 255), Color(255, 255, 137, 179), Color(255, 245, 199, 108)};
+    return colors[min(choice, 4u)];
+}
+void SetAccent(unsigned choice) { accent = AccentColor(choice); }
 Paint::Paint(HWND hwnd, HDC target, bool fade) : window(hwnd), printing(target != nullptr), reveal(fade) {
     BeginMotionPaint(hwnd);
     dc = target ? target : BeginPaint(window, &ps);
@@ -59,11 +65,16 @@ Paint::~Paint() {
     const float entrance = Entrance(window);
     if (reveal && entrance < 1) {
         Graphics g(buffer);
-        SolidBrush veil(Color(static_cast<BYTE>((1 - entrance) * 230), background.GetR(), background.GetG(), background.GetB()));
+        SolidBrush veil(Color(static_cast<BYTE>((1 - entrance) * 230 * min(1.0f, MotionAmount())),
+            background.GetR(), background.GetG(), background.GetB()));
         g.FillRectangle(&veil, 0, 0, width, height);
     }
     if (bitmap) {
-        BitBlt(dc, 0, 0, width, height, buffer, 0, 0, SRCCOPY);
+        if (printing) BitBlt(dc, 0, 0, width, height, buffer, 0, 0, SRCCOPY);
+        else if (!IsRectEmpty(&ps.rcPaint)) {
+            const auto& r = ps.rcPaint;
+            BitBlt(dc, r.left, r.top, r.right - r.left, r.bottom - r.top, buffer, r.left, r.top, SRCCOPY);
+        }
         if (!cached) { SelectObject(buffer, old); DeleteObject(bitmap); DeleteDC(buffer); }
     }
     if (!printing) EndPaint(window, &ps);
@@ -101,16 +112,16 @@ void ClipRound(Graphics& g, RectF r, float radius) {
 }
 void Button(Graphics& g, HWND hwnd, RectF r, const wstring& text, bool primary, bool hovered) {
     const auto motion = AnimateControl(hwnd, r, hovered, primary);
-    const float insetPress = motion.press * min(1.4f, r.Width * 0.009f);
+    const float insetPress = motion.press * min(1.4f, r.Width * 0.009f) * MotionAmount();
     r.Inflate(-insetPress, -insetPress);
     const auto hoverColor = text == L"×" ? Color(255, 184, 56, 63) : Color(255, 56, 65, 78);
     const auto fill = Mix(Mix(surface, hoverColor, motion.hover),
-        Mix(accent, Color(255, 163, 245, 213), motion.hover * 0.35f), motion.selected);
-    RectF shadow = r; shadow.Y += 1 + motion.hover * 1.2f;
+        Mix(accent, foreground, motion.hover * 0.35f), motion.selected);
+    RectF shadow = r; shadow.Y += 1 + motion.hover * 1.2f * MotionAmount();
     Round(g, shadow, 8, Color(static_cast<BYTE>(18 + motion.hover * 15), 0, 0, 0));
     Round(g, r, 8, Mix(fill, background, motion.press * 0.12f));
     Border(g, {r.X + 0.5f, r.Y + 0.5f, r.Width - 1, r.Height - 1}, 8,
-        Mix(Color(255, 65, 73, 85), Color(255, 169, 247, 219), motion.selected * 0.60f + motion.hover * 0.25f));
+        Mix(Color(255, 65, 73, 85), Mix(accent, foreground, 0.50f), motion.selected * 0.60f + motion.hover * 0.25f));
     const float inset = r.Width < 64 ? 6.0f : 16.0f;
     Text(g, text, {r.X + inset, r.Y + (r.Height - 22) / 2, r.Width - inset * 2, 24},
         14, Mix(foreground, background, motion.selected), primary);
@@ -122,10 +133,11 @@ void Toggle(Graphics& g, HWND hwnd, RectF r, const wstring& text, bool enabled, 
     Text(g, text, {r.X + 16, r.Y + (r.Height - 22) / 2, r.Width - 92, 24}, 14);
     const RectF track{r.GetRight() - 60, r.Y + (r.Height - 22) / 2, 42, 22};
     Round(g, track, 11, Mix(Color(255, 76, 85, 98), accent, motion.selected));
-    const float diameter = 14 + motion.press * 2;
+    const float press = motion.press * MotionAmount();
+    const float diameter = 14 + press * 2;
     const float x = track.X + 4 + motion.selected * (track.Width - 22);
     SolidBrush thumb(Mix(foreground, background, motion.selected));
-    g.FillEllipse(&thumb, x - motion.press, track.Y + (22 - diameter) / 2, diameter, diameter);
+    g.FillEllipse(&thumb, x - press, track.Y + (22 - diameter) / 2, diameter, diameter);
 }
 void ImageCache::Draw(Graphics& g, HWND hwnd, Bitmap& image, RectF rect) {
     const float scale = Scale(hwnd);
@@ -162,7 +174,7 @@ float FitScale(HWND hwnd, int width, int height, const RECT& work) {
     SetPropW(hwnd, L"ScreenShotPlus.UiScale", reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(scale * 1024)));
     return Scale(hwnd);
 }
-void Place(HWND hwnd, int width, int height, bool corner, POINT point) {
+void Place(HWND hwnd, int width, int height, bool corner, POINT point, unsigned cornerIndex) {
     if (!corner) GetCursorPos(&point);
     MONITORINFO info{sizeof(info)};
     GetMonitorInfoW(MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST), &info);
@@ -171,8 +183,11 @@ void Place(HWND hwnd, int width, int height, bool corner, POINT point) {
     const auto s = FitScale(hwnd, width, height, info.rcWork);
     const int w = static_cast<int>(width * s), h = static_cast<int>(height * s);
     const int gap = static_cast<int>(20 * s);
-    int x = corner ? info.rcWork.right - w - gap : info.rcWork.left + (info.rcWork.right - info.rcWork.left - w) / 2;
-    int y = corner ? info.rcWork.bottom - h - gap : info.rcWork.top + (info.rcWork.bottom - info.rcWork.top - h) / 2;
+    const bool left = cornerIndex == 1 || cornerIndex == 3, top = cornerIndex >= 2;
+    int x = corner ? (left ? info.rcWork.left + gap : info.rcWork.right - w - gap) :
+        info.rcWork.left + (info.rcWork.right - info.rcWork.left - w) / 2;
+    int y = corner ? (top ? info.rcWork.top + gap : info.rcWork.bottom - h - gap) :
+        info.rcWork.top + (info.rcWork.bottom - info.rcWork.top - h) / 2;
     x = max(static_cast<int>(info.rcWork.left), x); y = max(static_cast<int>(info.rcWork.top), y);
     SetWindowPos(hwnd, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
 }

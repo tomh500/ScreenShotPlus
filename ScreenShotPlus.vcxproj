@@ -136,6 +136,7 @@
     <ClInclude Include="preview.h" />
     <ClInclude Include="config.h" />
     <ClInclude Include="settings.h" />
+    <ClInclude Include="motion_selector.h" />
     <ClInclude Include="dragdrop.h" />
     <ClInclude Include="hotkeys.h" />
     <ClInclude Include="startup.h" /><ClInclude Include="instance.h" /><ClInclude Include="tray.h" />
@@ -150,6 +151,7 @@
     <ClCompile Include="preview.cpp" />
     <ClCompile Include="config.cpp" />
     <ClCompile Include="settings.cpp" />
+    <ClCompile Include="motion_selector.cpp" />
     <ClCompile Include="dragdrop.cpp" />
     <ClCompile Include="hotkeys.cpp" />
     <ClCompile Include="startup.cpp" /><ClCompile Include="instance.cpp" /><ClCompile Include="tray.cpp" />

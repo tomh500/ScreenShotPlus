@@ -14,8 +14,17 @@ struct Preview {
     ULONGLONG remaining = 0, lastTick = 0;
     function<void()> drag, edit;
     wstring dragStatus;
+    unsigned corner = 0, size = 1;
+    bool captureAnimation = true, dragAnimation = true;
 } preview;
-const RectF closeButton{278, 12, 28, 28}, imageRect{16, 52, 288, 166};
+int viewWidth = 320, viewHeight = 294;
+RectF closeButton{278, 12, 28, 28}, imageRect{16, 52, 288, 166};
+void Layout() {
+    constexpr array<int, 3> widths{280, 320, 400}, heights{270, 294, 338};
+    viewWidth = widths[preview.size]; viewHeight = heights[preview.size];
+    closeButton.X = static_cast<float>(viewWidth - 42);
+    imageRect.Width = static_cast<float>(viewWidth - 32); imageRect.Height = static_cast<float>(viewHeight - 128);
+}
 void DrawPreview(HWND hwnd, HDC target = nullptr) {
     ui::Paint paint(hwnd, target); Graphics g(paint.buffer); ui::Prepare(g, hwnd);
     const float progress = ui::EntranceProgress(hwnd);
@@ -26,18 +35,20 @@ void DrawPreview(HWND hwnd, HDC target = nullptr) {
         g.DrawLine(&tick, 17.0f, 25.0f, 17 + first * 4, 25 + first * 4);
         if (check > 1.0f / 3) { const float second = (check - 1.0f / 3) * 1.5f; g.DrawLine(&tick, 21.0f, 29.0f, 21 + second * 9, 29 - second * 10); }
     }
-    ui::Text(g, preview.dragStatus.empty() ? L"已保存 PNG" : preview.dragStatus, {40, 17, 228, 26}, 14, ui::accent, true);
+    ui::Text(g, preview.dragStatus.empty() ? L"已保存 PNG" : preview.dragStatus, {40, 17, static_cast<float>(viewWidth - 92), 26}, 14, ui::accent, true);
     ui::Button(g, hwnd, closeButton, L"×", false, ui::Inside(preview.mouse, closeButton));
     ui::Round(g, imageRect, 10, ui::surface);
     const auto motion = ui::AnimateControl(hwnd, imageRect, ui::Inside(preview.mouse, imageRect));
-    const float lifted = ui::AnimateValue(hwnd, 10, preview.dragging ? 1.0f : 0.0f, 0.20);
+    const float lifted = ui::AnimateValue(hwnd, 10, preview.dragging && preview.dragAnimation ? 1.0f : 0.0f, 0.20);
     if (preview.image) {
         const float scale = min(imageRect.Width / preview.image->GetWidth(), imageRect.Height / preview.image->GetHeight());
         const float w = preview.image->GetWidth() * scale, h = preview.image->GetHeight() * scale;
         const auto saved = g.Save(); ui::ClipRound(g, imageRect, 10);
-        const float zoom = (0.92f + 0.08f * ui::SpringReveal(progress)) * (1 + motion.hover * 0.012f - motion.press * 0.008f - lifted * 0.025f);
+        const float amount = ui::MotionAmount();
+        const float zoom = (1 - 0.08f * amount + 0.08f * amount * ui::SpringReveal(progress)) *
+            (1 + motion.hover * 0.012f * amount - motion.press * 0.008f * amount - lifted * 0.025f * amount);
         const float cx = imageRect.X + imageRect.Width / 2, cy = imageRect.Y + imageRect.Height / 2;
-        g.TranslateTransform(cx, cy + 10 * (1 - ui::Entrance(hwnd))); g.ScaleTransform(zoom, zoom); g.TranslateTransform(-cx, -cy);
+        g.TranslateTransform(cx, cy + 10 * amount * (1 - ui::Entrance(hwnd))); g.ScaleTransform(zoom, zoom); g.TranslateTransform(-cx, -cy);
         preview.thumbnail.Draw(g, hwnd, *preview.image, RectF(imageRect.X + (imageRect.Width - w) / 2,
             imageRect.Y + (imageRect.Height - h) / 2, w, h));
         g.Restore(saved);
@@ -45,8 +56,8 @@ void DrawPreview(HWND hwnd, HDC target = nullptr) {
     if (lifted > 0) ui::Round(g, imageRect, 10, Color(static_cast<BYTE>(lifted * 100), 25, 29, 36));
     ui::Border(g, imageRect, 10, Color(static_cast<BYTE>(70 + motion.hover * 150),
         ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()));
-    ui::Text(g, preview.dragging ? L"移动到目标位置，松开即可复制" : L"单击编辑 · 拖动到聊天窗口或文件夹", {16, 231, 288, 24}, 12);
-    ui::Text(g, preview.file.filename().wstring(), {16, 259, 288, 22}, 10, ui::muted);
+    ui::Text(g, preview.dragging ? L"移动到目标位置，松开即可复制" : L"单击编辑 · 拖动分享", {16, static_cast<float>(viewHeight - 63), imageRect.Width, 24}, 12);
+    ui::Text(g, preview.file.filename().wstring(), {16, static_cast<float>(viewHeight - 35), imageRect.Width, 22}, 10, ui::muted);
 }
 LRESULT CALLBACK PreviewProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     if (ui::MotionMessage(hwnd, msg, wparam, lparam)) return 0;
@@ -105,7 +116,7 @@ LRESULT CALLBACK PreviewProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
         return 0;
     }
     case WM_DPICHANGED: {
-        ui::DpiChanged(hwnd, lparam, 320, 294); return 0;
+        ui::DpiChanged(hwnd, lparam, viewWidth, viewHeight); return 0;
     }
     }
     return DefWindowProcW(hwnd, msg, wparam, lparam);
@@ -123,6 +134,11 @@ bool InitPreview(HINSTANCE instance, function<void()> drag, function<void()> edi
     if (preview.window) ui::Corners(preview.window);
     return preview.window != nullptr;
 }
+void ConfigurePreview(unsigned corner, unsigned size, bool captureAnimation, bool dragAnimation) {
+    preview.corner = min(corner, 3u); preview.size = min(size, 2u); preview.captureAnimation = captureAnimation;
+    preview.dragAnimation = dragAnimation;
+    Layout(); preview.thumbnail.Reset();
+}
 void ShowPreview(Bitmap* image, const filesystem::path& file, POINT point, unsigned seconds, RECT origin) {
     if (!preview.window || !image) return;
     CancelVisualEffects(); preview.dragStatus.clear();
@@ -130,10 +146,11 @@ void ShowPreview(Bitmap* image, const filesystem::path& file, POINT point, unsig
     preview.remaining = static_cast<ULONGLONG>(seconds) * 1000; preview.lastTick = GetTickCount64();
     KillTimer(preview.window, 1);
     if (seconds) SetTimer(preview.window, 1, 100, nullptr);
-    ui::Place(preview.window, 320, 294, true, point);
+    Layout(); ui::Place(preview.window, viewWidth, viewHeight, true, point, preview.corner);
     ui::RestartMotion(preview.window);
     ShowWindow(preview.window, SW_SHOWNOACTIVATE); InvalidateRect(preview.window, nullptr, FALSE);
-    if (origin.right > origin.left && origin.bottom > origin.top) FlyToPreview(*image, origin, PreviewImageScreenRect());
+    if (preview.captureAnimation && ui::DecorativeMotion(2) && origin.right > origin.left && origin.bottom > origin.top)
+        FlyToPreview(*image, origin, PreviewImageScreenRect());
 }
 RECT PreviewImageScreenRect() {
     if (!preview.window || !preview.image) return {};

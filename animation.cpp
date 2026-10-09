@@ -3,13 +3,17 @@
 #include <mutex>
 #include <thread>
 #include <new>
+#include <atomic>
 using namespace std;
 using namespace Gdiplus;
 
 namespace ui {
 namespace {
 constexpr UINT frameMessage = WM_APP + 70;
+constexpr UINT optionsMessage = WM_APP + 74;
 constexpr wchar_t stateProperty[] = L"ScreenShotPlus.Motion";
+atomic<unsigned> motionLevel{2}, motionSpeed{1};
+atomic<bool> systemMotionEnabled{true};
 double Now() { return chrono::duration<double>(chrono::steady_clock::now().time_since_epoch()).count(); }
 bool AnimationsEnabled() {
     BOOL enabled = TRUE; HIGHCONTRASTW contrast{sizeof(contrast)};
@@ -102,7 +106,7 @@ struct Control {
     Tween hover, press, selected;
     unsigned serial = 0;
 };
-struct ValueTrack { unsigned key = 0, serial = 0; Tween tween; };
+struct ValueTrack { unsigned key = 0, serial = 0; Tween tween; bool always = false; };
 struct Motion {
     UINT_PTR cookie = 0;
     HMONITOR monitor = nullptr;
@@ -110,6 +114,8 @@ struct Motion {
     unsigned long long frames = 0;
     unsigned serial = 0;
     bool enabled = true, running = false, down = false, continuous = false;
+    bool localRegion = false, controlActive = false;
+    RECT region{};
     POINT pressed{-1, -1}, mouse{-1, -1};
     Tween entrance;
     vector<Control> controls;
@@ -124,12 +130,63 @@ void UpdateRate(HWND hwnd, Motion& state) {
     state.rate = RefreshRate(hwnd);
     if (state.running) Clock().Schedule(hwnd, state.cookie, state.rate, true);
 }
-void Settle(Motion& state) {
+void Settle(Motion& state, bool keepAlways = false) {
     const auto settle = [](Tween& t) { t.from = t.target; t.duration = 0; };
     settle(state.entrance);
     for (auto& c : state.controls) { settle(c.hover); settle(c.press); settle(c.selected); }
-    for (auto& value : state.values) settle(value.tween);
+    for (auto& value : state.values) if (!keepAlways || !value.always) settle(value.tween);
 }
+void SchedulePaint(HWND hwnd, Motion& state, double now) {
+    bool active = state.entrance.Active(now), forced = false;
+    state.controlActive = false;
+    for (const auto& c : state.controls) state.controlActive |= c.hover.Active(now) || c.press.Active(now) || c.selected.Active(now);
+    active |= state.controlActive;
+    for (const auto& value : state.values) {
+        if (value.always) forced |= value.tween.Active(now);
+        else active |= value.tween.Active(now);
+    }
+    // Pointer feedback and the intensity selector are independent of the
+    // decorative-motion policy, including Windows' reduced-motion setting.
+    state.running = (state.continuous || forced || (state.enabled && active)) &&
+        IsWindowVisible(hwnd) && !IsIconic(hwnd);
+    Clock().Schedule(hwnd, state.cookie, state.rate, state.running);
+}
+void UpdatePolicy(HWND hwnd, Motion& state) {
+    state.enabled = DecorativeMotion() && Clock().Ready();
+    if (!state.enabled) Settle(state, true);
+    SchedulePaint(hwnd, state, Now());
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+}
+
+void SetMotionOptions(unsigned level, unsigned speed) {
+    motionLevel.store(min(level, 4u)); motionSpeed.store(min(speed, 2u));
+    systemMotionEnabled.store(AnimationsEnabled());
+    // Window state stays on each window's owning UI thread. Send immediately
+    // on this thread and post elsewhere without borrowing another thread's
+    // Motion pointer or holding a lock while invoking a window procedure.
+    EnumWindows([](HWND hwnd, LPARAM) -> BOOL {
+        DWORD process = 0;
+        const DWORD thread = GetWindowThreadProcessId(hwnd, &process);
+        if (process == GetCurrentProcessId() && GetPropW(hwnd, stateProperty)) {
+            if (thread == GetCurrentThreadId()) SendMessageW(hwnd, optionsMessage, 0, 0);
+            else PostMessageW(hwnd, optionsMessage, 0, 0);
+        }
+        return TRUE;
+    }, 0);
+}
+unsigned MotionLevel() { return motionLevel.load(); }
+float MotionAmount() {
+    constexpr float amounts[]{0, 0.4f, 0.75f, 1, 1.3f};
+    return amounts[MotionLevel()];
+}
+double MotionDuration(double seconds) {
+    constexpr double speeds[]{0.72, 1, 1.28}, levels[]{0.75, 0.85, 1, 1.12, 1.24};
+    return max(0.0, seconds) * speeds[motionSpeed.load()] * levels[MotionLevel()];
+}
+bool DecorativeMotion(unsigned minimum) {
+    const auto level = MotionLevel();
+    return level && level >= minimum && systemMotionEnabled.load();
 }
 
 float Tween::Value(double now) const {
@@ -189,7 +246,8 @@ bool MotionMessage(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message == WM_NCCREATE) {
         auto state = new (nothrow) Motion;
         if (state) {
-            state->cookie = Clock().Cookie(); state->enabled = AnimationsEnabled() && Clock().Ready();
+            systemMotionEnabled.store(AnimationsEnabled());
+            state->cookie = Clock().Cookie(); state->enabled = DecorativeMotion() && Clock().Ready();
             if (!SetPropW(hwnd, stateProperty, state)) delete state;
         }
     }
@@ -201,7 +259,7 @@ bool MotionMessage(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
             Clock().Acknowledge(state->cookie);
             if (IsWindowVisible(hwnd) && !IsIconic(hwnd) && state->running) {
                 ++state->frames;
-                InvalidateRect(hwnd, nullptr, FALSE);
+                InvalidateRect(hwnd, state->localRegion && !state->controlActive ? &state->region : nullptr, FALSE);
                 // WM_PAINT is low priority; paint now so a busy pointer queue
                 // cannot starve a scheduled animation frame.
                 UpdateWindow(hwnd);
@@ -222,9 +280,10 @@ bool MotionMessage(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         UpdateRate(hwnd, *state); break;
     case WM_SETTINGCHANGE:
         UpdateRate(hwnd, *state);
-        state->enabled = AnimationsEnabled() && Clock().Ready();
-        if (!state->enabled) { Settle(*state); Stop(hwnd, *state); }
-        InvalidateRect(hwnd, nullptr, FALSE); break;
+        systemMotionEnabled.store(AnimationsEnabled());
+        UpdatePolicy(hwnd, *state); break;
+    case optionsMessage:
+        UpdatePolicy(hwnd, *state); return true;
     case WM_MOUSEMOVE:
         state->mouse = Mouse(hwnd, lparam); break;
     case WM_LBUTTONDOWN:
@@ -242,10 +301,11 @@ bool MotionMessage(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
 }
 void RestartMotion(HWND hwnd, double seconds) {
     if (auto state = State(hwnd)) {
-        state->enabled = AnimationsEnabled() && Clock().Ready();
+        systemMotionEnabled.store(AnimationsEnabled());
+        state->enabled = DecorativeMotion() && Clock().Ready();
         state->down = false; state->mouse = {-1, -1}; state->controls.clear(); state->values.clear();
         UpdateRate(hwnd, *state);
-        state->entrance = {}; state->entrance.Set(1, Now(), seconds, state->enabled);
+        state->entrance = {}; state->entrance.Set(1, Now(), MotionDuration(seconds), state->enabled);
         InvalidateRect(hwnd, nullptr, FALSE);
     }
 }
@@ -257,13 +317,7 @@ void EndMotionPaint(HWND hwnd) {
     if (!state) return;
     erase_if(state->controls, [&](const auto& control) { return control.serial != state->serial; });
     erase_if(state->values, [&](const auto& value) { return value.serial != state->serial; });
-    const double now = state->paintTime;
-    bool active = state->entrance.Active(now);
-    for (const auto& c : state->controls) active |= c.hover.Active(now) || c.press.Active(now) || c.selected.Active(now);
-    for (const auto& value : state->values) active |= value.tween.Active(now);
-    // Pointer-following is functional feedback, including with reduced motion.
-    state->running = (state->continuous || (state->enabled && active)) && IsWindowVisible(hwnd) && !IsIconic(hwnd);
-    Clock().Schedule(hwnd, state->cookie, state->rate, state->running);
+    SchedulePaint(hwnd, *state, state->paintTime);
 }
 float Entrance(HWND hwnd) {
     auto state = State(hwnd); return state ? state->entrance.Value(state->paintTime) : 1;
@@ -279,7 +333,7 @@ float SpringReveal(float progress) {
     const auto curve = [](float p) { return 1 - exp(-8 * p) * (cos(10 * p) + 0.8f * sin(10 * p)); };
     return curve(t) / curve(1);
 }
-float AnimateValue(HWND hwnd, unsigned key, float target, double seconds, float initial) {
+float AnimateValue(HWND hwnd, unsigned key, float target, double seconds, float initial, bool always) {
     auto state = State(hwnd);
     if (!state) return target;
     auto it = find_if(state->values.begin(), state->values.end(), [&](const auto& value) { return value.key == key; });
@@ -288,7 +342,8 @@ float AnimateValue(HWND hwnd, unsigned key, float target, double seconds, float 
         it->tween.Set(initial, state->paintTime, 0, false);
     }
     it->serial = state->serial;
-    it->tween.Set(target, state->paintTime, seconds, state->enabled);
+    it->always = always;
+    it->tween.Set(target, state->paintTime, MotionDuration(seconds), always ? Clock().Ready() : state->enabled);
     return it->tween.Value(state->paintTime);
 }
 void ContinuousMotion(HWND hwnd, bool active) {
@@ -303,6 +358,12 @@ void MotionMonitor(HWND hwnd, HMONITOR monitor) {
         if (state->running) Clock().Schedule(hwnd, state->cookie, state->rate, true);
     }
 }
+void MotionRegion(HWND hwnd, const RECT* region) {
+    if (auto state = State(hwnd)) {
+        state->localRegion = region != nullptr;
+        if (region) state->region = *region;
+    }
+}
 Interaction AnimateControl(HWND hwnd, RectF rect, bool hovered, bool selected) {
     auto state = State(hwnd);
     if (!state) return {hovered ? 1.0f : 0.0f, 0, selected ? 1.0f : 0.0f};
@@ -313,10 +374,10 @@ Interaction AnimateControl(HWND hwnd, RectF rect, bool hovered, bool selected) {
     }
     it->serial = state->serial;
     const double now = state->paintTime;
-    it->hover.Set(hovered ? 1.0f : 0.0f, now, 0.16, state->enabled);
-    const bool pressing = state->down && Inside(state->pressed, rect) && Inside(state->mouse, rect);
-    it->press.Set(pressing ? 1.0f : 0.0f, now, pressing ? 0.075 : 0.19, state->enabled);
-    it->selected.Set(selected ? 1.0f : 0.0f, now, 0.20, state->enabled);
+    it->hover.Set(hovered ? 1.0f : 0.0f, now, MotionDuration(0.16), state->enabled);
+    const bool pressing = state->enabled && state->down && Inside(state->pressed, rect) && Inside(state->mouse, rect);
+    it->press.Set(pressing ? 1.0f : 0.0f, now, MotionDuration(pressing ? 0.075 : 0.19), state->enabled);
+    it->selected.Set(selected ? 1.0f : 0.0f, now, MotionDuration(0.20), state->enabled);
     return {it->hover.Value(now), it->press.Value(now), it->selected.Value(now)};
 }
 MotionInfo GetMotionInfo(HWND hwnd) {

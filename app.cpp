@@ -23,6 +23,7 @@ struct App {
     filesystem::path configFile;
     Hotkeys hotkeys;
     bool exiting = false;
+    bool startup = false;
     UINT taskbarCreated = 0;
     unique_ptr<Bitmap> latest, pending;
     filesystem::path latestFile;
@@ -36,7 +37,7 @@ const RectF retryButton{24, 460, 372, 44};
 void ShowPanel() {
     if (app.exiting || app.phase != App::Idle) return;
     if (SettingsVisible()) { ShowSettings(app.config); return; }
-    ui::Place(app.panel, 420, 570); ShowWindow(app.panel, SW_SHOW);
+    ui::Place(app.panel, PANEL_WIDTH, PANEL_HEIGHT); ShowWindow(app.panel, SW_SHOW);
     SetForegroundWindow(app.panel); InvalidateRect(app.panel, nullptr, FALSE);
 }
 void Notice(const wstring& text) { app.notice = text; ShowPanel(); }
@@ -170,7 +171,7 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
     }
     case WM_KEYDOWN: if (wparam == VK_ESCAPE) ShowWindow(hwnd, SW_HIDE); return 0;
     case WM_DPICHANGED: {
-        ui::DpiChanged(hwnd, lparam, 420, 570);
+        ui::DpiChanged(hwnd, lparam, PANEL_WIDTH, PANEL_HEIGHT);
         return 0;
     }
     case WM_DESTROY:
@@ -182,8 +183,9 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
     return DefWindowProcW(hwnd, message, wparam, lparam);
 }
 }
-int RunApp(HINSTANCE instance, const filesystem::path& configFile) {
+int RunApp(HINSTANCE instance, bool startup, const filesystem::path& configFile) {
     app.instance = instance;
+    app.startup = startup;
     app.configFile = configFile.empty() ? ConfigFile() : configFile;
     wstring warning; app.config = LoadConfig(app.configFile, warning);
     if (!warning.empty()) app.notice = warning;
@@ -205,7 +207,9 @@ int RunApp(HINSTANCE instance, const filesystem::path& configFile) {
     wcscpy_s(app.tray.szTip, L"ScreenShotPlus · 区域截图与拖动分享"); AddTray();
     const auto hotkeyWarning = RegisterConfiguredHotkeys(app.panel, app.hotkeys, app.config);
     if (!hotkeyWarning.empty()) app.notice += L" " + hotkeyWarning;
-    ShowPanel();
+    // 开机自启动时静默驻留托盘，不弹出面板；此时托盘气泡仍说明程序已就绪。
+    if (app.startup) app.notice = L"已随开机启动，正在托盘待命。点击托盘图标可打开面板。";
+    else ShowPanel();
     MSG message{}; BOOL result;
     while ((result = GetMessageW(&message, nullptr, 0, 0)) > 0) { TranslateMessage(&message); DispatchMessageW(&message); }
     if (IsWindow(app.panel)) DestroyWindow(app.panel);

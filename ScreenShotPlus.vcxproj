@@ -138,6 +138,7 @@
     <ClInclude Include="settings.h" />
     <ClInclude Include="dragdrop.h" />
     <ClInclude Include="hotkeys.h" />
+    <ClInclude Include="startup.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="ScreenShotPlus.cpp" />
@@ -150,6 +151,7 @@
     <ClCompile Include="settings.cpp" />
     <ClCompile Include="dragdrop.cpp" />
     <ClCompile Include="hotkeys.cpp" />
+    <ClCompile Include="startup.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="ScreenShotPlus.rc" />

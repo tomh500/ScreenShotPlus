@@ -35,9 +35,18 @@ void SetDiagnostics(bool enabled);
 Gdiplus::Bitmap* Canvas();
 Gdiplus::RectF CanvasRect();
 Gdiplus::RectF SwatchRect(int index);
+Gdiplus::RectF CustomSwatchRect();
 int SelectedColorIndex();
 size_t ShapeCount();
+const std::vector<Shape>& Shapes();
 void UndoLastShape();
 void RedoLastShape();
 void RequestSave();
+void OpenColorPickerForTest();
+bool ColorPickerVisible();
+void SetColorPickerValues(int r, int g, int b);
+Gdiplus::Color ColorPickerPreview();
+void ConfirmColorPicker();
+void CancelColorPicker();
+Gdiplus::RectF ColorPickerTrackRect(int channel);
 }

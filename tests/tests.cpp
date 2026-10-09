@@ -338,10 +338,45 @@ void EditorInteraction(HINSTANCE instance, const filesystem::path& root) {
     SendMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(swatchPoint.x, swatchPoint.y));
     Check(editor::SelectedColorIndex() == 1, "preset swatch selects the brush color");
     Check(editor::ShapeCount() == 1, "brush stroke recorded once");
+    // 自定义 RGB 调色板：滑条换算、预览色，以及确定后成为当前画笔颜色。
+    editor::SetColorPickerValues(0, 0, 0);
+    editor::OpenColorPickerForTest();
+    Check(editor::ColorPickerVisible(), "RGB palette opens");
+    HWND palette = FindWindowW(L"ScreenShotPlus.ColorPicker", nullptr);
+    Check(palette != nullptr, "RGB palette window exists");
+    const RectF track = editor::ColorPickerTrackRect(0);
+    const POINT knob{static_cast<LONG>((track.X + track.Width * 0.5f) * scale),
+        static_cast<LONG>((track.Y + track.Height / 2) * scale)};
+    SendMessageW(palette, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(knob.x, knob.y));
+    SendMessageW(palette, WM_LBUTTONUP, 0, MAKELPARAM(knob.x, knob.y));
+    const Color midway = editor::ColorPickerPreview();
+    Check(midway.GetR() >= 120 && midway.GetR() <= 136, "slider position maps to the channel value");
+    editor::SetColorPickerValues(12, 200, 90);
+    editor::ConfirmColorPicker();
+    Check(!editor::ColorPickerVisible(), "RGB palette closes after confirming");
+    Check(editor::SelectedColorIndex() == editor::kPresetCount, "custom RGB becomes the active brush color");
+    // 用自定义色再画一笔，导出后必须出现该颜色。
+    const POINT from2 = toClient(20, 45), to2 = toClient(60, 45);
+    SendMessageW(window, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(from2.x, from2.y));
+    SendMessageW(window, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(to2.x, to2.y));
+    SendMessageW(window, WM_LBUTTONUP, 0, MAKELPARAM(to2.x, to2.y));
+    const Color custom(255, 12, 200, 90);
+    unique_ptr<Bitmap> withCustom(MakeBitmap(80, 60, background));
+    Check(editor::Flatten(*editor::Canvas(), editor::Shapes(), *withCustom) &&
+        AnyPixelNear(*withCustom, 40, 45, 5, custom), "custom RGB stroke is flattened with the chosen color");
+    // 取消不应改变当前颜色。
+    editor::OpenColorPickerForTest();
+    editor::SetColorPickerValues(1, 2, 3);
+    editor::CancelColorPicker();
+    Check(editor::SelectedColorIndex() == editor::kPresetCount, "cancelling the RGB palette keeps the color");
     editor::UndoLastShape();
-    Check(editor::ShapeCount() == 0, "undo removes the last annotation");
+    Check(editor::ShapeCount() == 1, "undo removes the custom RGB annotation");
     editor::RedoLastShape();
-    Check(editor::ShapeCount() == 1, "redo restores the annotation");
+    Check(editor::ShapeCount() == 2, "redo restores the custom RGB annotation");
+    editor::UndoLastShape();
+    Check(editor::ShapeCount() == 1, "undo is repeatable");
+    editor::RedoLastShape();
+    Check(editor::ShapeCount() == 2, "redo is repeatable");
     // 保存：写回原文件，并把成品交回调用方。
     editor::RequestSave();
     Check(!editor::EditorVisible(), "editor closes after saving");

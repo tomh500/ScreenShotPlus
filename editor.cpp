@@ -11,7 +11,10 @@ constexpr int kMinCanvasWidth = 480, kMaxCanvasWidth = 1280;
 constexpr int kMargin = kSideMargin + kToolbarWidth + kSideMargin;
 constexpr int kToolbarX = kSideMargin, kToolbarContent = kToolbarWidth - 10;
 constexpr int kColumns = 3, kGap = 2;
-constexpr float kButtonHeight = 32, kSwatchHeight = 30;
+constexpr float kButtonHeight = 32, kSwatchHeight = 34;
+// 色块是 3 列方格，最后一格是自定义 RGB 调色板入口。
+constexpr int kCustomIndex = kPresetCount;
+constexpr float kSwatchTop = 66, kCustomTop = kSwatchTop + 3 * (kSwatchHeight + kGap) + 4;
 
 RectF Cell(int index, float top, float height) {
     const float width = (kToolbarContent - kGap * (kColumns - 1)) / kColumns;
@@ -22,6 +25,154 @@ RectF Wide(int index, float top, float height, float width) {
     return RectF(kToolbarX + index * width + index * kGap, top, width - kGap, height);
 }
 
+// ---- 自定义 RGB 调色板：自绘三通道滑条 + 数值输入 ----
+constexpr int kPickerWidth = 284, kPickerHeight = 242;
+struct Picker {
+    HWND window = nullptr;
+    HINSTANCE instance = nullptr;
+    array<int, 3> color{255, 128, 64};      // R G B
+    array<wstring, 3> text{L"255", L"128", L"64"}; // 正在输入时的原始文本
+    int editing = -1;                       // 正在编辑的通道
+    UINT capturing = 0;                     // 正在拖动的滑条通道 + 1，0 表示未拖动
+    POINT mouse{-1, -1};
+    function<void(Color)> apply;
+};
+Picker picker;
+const array<float, 3> kPickerRowY{56, 96, 136};
+const RectF kPickerPreview{24, 178, 76, 44}, kPickerOk{116, 178, 68, 44}, kPickerCancel{196, 178, 76, 44};
+RectF PickerTrack(int channel) { return RectF(44, kPickerRowY[channel] + 10, 172, 12); }
+Color PickerColor() {
+    return Color(255, static_cast<BYTE>(clamp(picker.color[0], 0, 255)), static_cast<BYTE>(clamp(picker.color[1], 0, 255)),
+        static_cast<BYTE>(clamp(picker.color[2], 0, 255)));
+}
+void PickerRefreshText() {
+    for (size_t i = 0; i < picker.text.size(); ++i) picker.text[i] = to_wstring(picker.color[i]);
+}
+void PickerClose() {
+    if (picker.window) ShowWindow(picker.window, SW_HIDE);
+    picker.editing = -1;
+    picker.capturing = 0;
+}
+void PickerApply() {
+    const Color chosen = PickerColor();
+    auto apply = picker.apply;
+    PickerClose();
+    if (apply) apply(chosen);
+}
+void DrawPicker(HWND hwnd) {
+    ui::Paint paint(hwnd);
+    Graphics g(paint.buffer);
+    ui::Prepare(g, hwnd);
+    ui::Text(g, L"自定义画笔颜色", {24, 18, 236, 26}, 15, ui::foreground, true);
+    const array<const wchar_t*, 3> names{L"R", L"G", L"B"};
+    for (int channel = 0; channel < 3; ++channel) {
+        const BYTE value = static_cast<BYTE>(clamp(picker.color[channel], 0, 255));
+        const Color accent(255, channel == 0 ? value : 60, channel == 1 ? value : 60, channel == 2 ? value : 60);
+        ui::Text(g, names[channel], {24, kPickerRowY[channel], 20, 32}, 14, ui::foreground, true);
+        const RectF track = PickerTrack(channel);
+        ui::Round(g, track, 6, ui::background);
+        ui::Round(g, {track.X, track.Y, track.Width * value / 255.0f, track.Height}, 6, accent);
+        const float knobX = track.X + track.Width * value / 255.0f;
+        SolidBrush knob(ui::foreground);
+        g.FillEllipse(&knob, RectF(knobX - 9.0f, track.Y - 4.0f, 18.0f, 18.0f));
+        ui::Button(g, {226, kPickerRowY[channel], 58, 32}, picker.text[channel],
+            picker.editing == channel, ui::Inside(picker.mouse, RectF(226, kPickerRowY[channel], 58, 32)));
+    }
+    ui::Button(g, kPickerPreview, L"预览", false, false);
+    ui::Round(g, {kPickerPreview.X + 6, kPickerPreview.Y + 6, kPickerPreview.Width - 12, kPickerPreview.Height - 12},
+        6, PickerColor());
+    ui::Button(g, kPickerOk, L"确定", true, false);
+    ui::Button(g, kPickerCancel, L"取消", false, false);
+}
+
+void PickerSetFromSlider(int channel, float x) {
+    const RectF track = PickerTrack(channel);
+    const float ratio = clamp((x - track.X) / track.Width, 0.0f, 1.0f);
+    picker.color[channel] = static_cast<int>(ratio * 255 + 0.5f);
+    picker.text[channel] = to_wstring(picker.color[channel]);
+}
+// 数值输入：只接受数字，回车或失焦时收敛到 0..255。
+void PickerCommitText() {
+    if (picker.editing < 0) return;
+    const int channel = picker.editing;
+    int value = 0;
+    bool digits = false;
+    for (const wchar_t character : picker.text[channel]) {
+        if (character < L'0' || character > L'9') continue;
+        digits = true;
+        value = value * 10 + (character - L'0');
+        if (value > 999) value = 999;
+    }
+    if (!digits) value = picker.color[channel];
+    picker.color[channel] = clamp(value, 0, 255);
+    picker.text[channel] = to_wstring(picker.color[channel]);
+    picker.editing = -1;
+}
+int PickerHit(const POINT& point) {
+    for (int channel = 0; channel < 3; ++channel) {
+        if (ui::Inside(point, RectF(226, kPickerRowY[channel], 58, 32))) return 100 + channel;
+        if (ui::Inside(point, PickerTrack(channel))) return channel;
+    }
+    if (ui::Inside(point, kPickerOk)) return 200;
+    if (ui::Inside(point, kPickerCancel)) return 201;
+    return -1;
+}
+LRESULT CALLBACK PickerProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    switch (msg) {
+    case WM_PAINT: DrawPicker(hwnd); return 0;
+    case WM_ERASEBKGND: return 1;
+    case WM_CLOSE: PickerClose(); return 0;
+    case WM_MOUSEMOVE: {
+        picker.mouse = ui::Mouse(hwnd, lparam);
+        if (picker.capturing) PickerSetFromSlider(static_cast<int>(picker.capturing - 1), static_cast<float>(picker.mouse.x));
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
+    case WM_MOUSELEAVE: picker.mouse = {-1, -1}; InvalidateRect(hwnd, nullptr, FALSE); return 0;
+    case WM_LBUTTONDOWN: {
+        const POINT point = ui::Mouse(hwnd, lparam);
+        picker.mouse = point;
+        const int hit = PickerHit(point);
+        if (hit >= 0 && hit < 3) {
+            PickerCommitText();
+            picker.capturing = static_cast<UINT>(hit) + 1;
+            SetCapture(hwnd);
+            PickerSetFromSlider(hit, static_cast<float>(point.x));
+        } else if (hit >= 100 && hit < 103) {
+            PickerCommitText();
+            picker.editing = hit - 100;
+            picker.text[picker.editing].clear();
+            SetFocus(hwnd);
+        } else if (hit >= 0) {
+            PickerCommitText();
+            if (hit == 200) { PickerApply(); return 0; }
+            PickerClose();
+        }
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
+    case WM_LBUTTONUP:
+        if (picker.capturing) { picker.capturing = 0; if (GetCapture() == hwnd) ReleaseCapture(); }
+        return 0;
+    case WM_CAPTURECHANGED: picker.capturing = 0; return 0;
+    case WM_KEYDOWN:
+        if (wparam == VK_ESCAPE) { picker.editing = -1; PickerClose(); return 0; }
+        if (wparam == VK_RETURN) { PickerCommitText(); InvalidateRect(hwnd, nullptr, FALSE); return 0; }
+        return 0;
+    case WM_CHAR: {
+        const wchar_t character = static_cast<wchar_t>(wparam);
+        if (picker.editing < 0) return 0;
+        if (character == L'\b') {
+            if (!picker.text[picker.editing].empty()) picker.text[picker.editing].pop_back();
+        } else if (character >= L'0' && character <= L'9' && picker.text[picker.editing].size() < 3) {
+            picker.text[picker.editing].push_back(character);
+        }
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
 struct Editor {
     HWND window = nullptr, owner = nullptr;
     HINSTANCE instance = nullptr;
@@ -31,6 +182,7 @@ struct Editor {
     Tool tool = Tool::Brush;
     bool erasing = false;
     int colorIndex = 0;
+    Color customColor{255, 255, 255, 255};  // 自定义 RGB 画笔颜色
     float stroke = 4, fontSize = 32;
     Shape current;                          // 正在绘制、尚未入栈的标注
     bool drawing = false, textPending = false, dirty = false;
@@ -118,6 +270,33 @@ bool InsidePoint(const PointF& point, const RectF& rect) {
     return point.X >= rect.X && point.Y >= rect.Y && point.X < rect.GetRight() && point.Y < rect.GetBottom();
 }
 bool InCanvas(const PointF& point) { return InsidePoint(point, editor.canvasRect); }
+// 自定义 RGB 颜色与预设色共用同一个“当前颜色”概念。
+Color ActiveColor() {
+    return editor.colorIndex == kCustomIndex ? editor.customColor : ColorAt(editor.colorIndex);
+}
+// 打开自绘 RGB 调色板；确定后把结果设为当前画笔颜色。
+void OpenColorPicker() {
+    if (!picker.window) return;
+    picker.color = {editor.customColor.GetR(), editor.customColor.GetG(), editor.customColor.GetB()};
+    picker.editing = -1;
+    picker.capturing = 0;
+    picker.mouse = {-1, -1};
+    picker.apply = [](Color chosen) {
+        editor.customColor = chosen;
+        editor.colorIndex = kCustomIndex;
+        editor.erasing = false;
+        editor.tool = Tool::Brush;
+        InvalidateRect(editor.window, nullptr, FALSE);
+    };
+    RECT editorRect{}; GetWindowRect(editor.window, &editorRect);
+    const float scale = ui::Scale(editor.window);
+    ui::PlaceAt(picker.window, editorRect.left - static_cast<int>(kPickerWidth * scale) - 12, editorRect.top,
+        kPickerWidth, kPickerHeight, POINT{editorRect.left, editorRect.top});
+    ShowWindow(picker.window, SW_SHOW);
+    SetForegroundWindow(picker.window);
+    SetFocus(picker.window);
+    InvalidateRect(picker.window, nullptr, FALSE);
+}
 void Layout(Bitmap& image) {    const int imageWidth = max(1, static_cast<int>(image.GetWidth()));
     const int imageHeight = max(1, static_cast<int>(image.GetHeight()));
     int canvasWidth = clamp(imageWidth, kMinCanvasWidth, kMaxCanvasWidth);
@@ -140,7 +319,7 @@ void Paint(HWND hwnd) {
     ui::Text(g, L"×", {84, 8, 26, 24}, 18, ui::muted, true);
     ui::Text(g, L"标注编辑", {12, 42, 96, 20}, 12, ui::foreground, true);
     for (int i = 0; i < kPresetCount; ++i) {
-        const RectF cell = Cell(i, 66, kSwatchHeight);
+        const RectF cell = Cell(i, kSwatchTop, kSwatchHeight);
         GraphicsPath path;
         const float d = min(cell.Width, cell.Height);
         path.AddEllipse(cell.X + (cell.Width - d) / 2, cell.Y + (cell.Height - d) / 2, d, d);
@@ -151,7 +330,14 @@ void Paint(HWND hwnd) {
             g.DrawPath(&ring, &path);
         }
     }
-    const float row1 = 66 + 3 * (kSwatchHeight + kGap) + 6;
+    // 自定义 RGB 入口：方格显示当前自定义色，选中时加高亮边。
+    const RectF custom = Cell(kCustomIndex, kCustomTop, kSwatchHeight);
+    ui::Round(g, custom, 8, editor.colorIndex == kCustomIndex ? ui::accent : ui::background);
+    ui::Round(g, {custom.X + 3, custom.Y + 3, custom.Width - 6, custom.Height - 6}, 6, editor.customColor);
+    ui::Text(g, L"RGB", {custom.X, custom.Y + 8, custom.Width, 20}, 11,
+        editor.customColor.GetR() + editor.customColor.GetG() + editor.customColor.GetB() > 380 ?
+        Color(255, 20, 26, 35) : ui::foreground);
+    const float row1 = kCustomTop + kSwatchHeight + 10;
     const float row2 = row1 + kButtonHeight + kGap + 6;
     const float row3 = row2 + kButtonHeight + kGap + 10;
     const float actionWidth = (kToolbarContent + kGap) / 2;
@@ -222,7 +408,7 @@ PointF ToClient(HWND hwnd, LPARAM lparam) {
 Shape NewShape() {
     Shape shape;
     shape.tool = editor.tool;
-    shape.color = editor.erasing ? Color(255, 0, 0, 0) : PresetColor(editor.colorIndex);
+    shape.color = editor.erasing ? Color(255, 0, 0, 0) : ActiveColor();
     shape.stroke = editor.stroke;
     shape.size = editor.fontSize;
     return shape;
@@ -278,11 +464,16 @@ void Cancel() {
 void OnClick(const PointF& point) {
     if (InsidePoint(point, RectF(84, 8, 26, 24))) { Cancel(); return; }
     for (int i = 0; i < kPresetCount; ++i) {
-        if (InsidePoint(point, Cell(i, 66, kSwatchHeight))) {
+        if (InsidePoint(point, Cell(i, kSwatchTop, kSwatchHeight))) {
             editor.colorIndex = i; editor.erasing = false; editor.tool = Tool::Brush; return;
         }
     }
-    const float row1 = 66 + 3 * (kSwatchHeight + kGap) + 6;
+    if (InsidePoint(point, Cell(kCustomIndex, kCustomTop, kSwatchHeight))) {
+        editor.erasing = false; editor.tool = Tool::Brush;
+        OpenColorPicker();
+        return;
+    }
+    const float row1 = kCustomTop + kSwatchHeight + 10;
     const float row2 = row1 + kButtonHeight + kGap + 6;
     const float row3 = row2 + kButtonHeight + kGap + 10;
     if (InsidePoint(point, Cell(0, row1, kButtonHeight))) { if (Pending()) CommitText(); CancelText(); editor.tool = Tool::Text; return; }
@@ -459,7 +650,26 @@ bool InitEditor(HINSTANCE instance, HWND owner, function<void(Bitmap*, const fil
     editor.window = CreateWindowExW(WS_EX_TOOLWINDOW, cls.lpszClassName, L"ScreenShotPlus 标注编辑", WS_POPUP,
         0, 0, 900, 600, owner, nullptr, instance, nullptr);
     if (editor.window) ui::Corners(editor.window);
-    return editor.window != nullptr;
+    if (!editor.window) return false;
+    WNDCLASSEXW pickerClass{sizeof(pickerClass)};
+    pickerClass.hInstance = instance; pickerClass.lpfnWndProc = PickerProc;
+    pickerClass.lpszClassName = L"ScreenShotPlus.ColorPicker";
+    pickerClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    WNDCLASSEXW pickerExisting{sizeof(pickerExisting)};
+    if (!GetClassInfoExW(instance, pickerClass.lpszClassName, &pickerExisting) &&
+        !RegisterClassExW(&pickerClass)) {
+        DestroyWindow(editor.window); editor.window = nullptr; return false;
+    }
+    picker = Picker{};
+    picker.instance = instance;
+    picker.window = CreateWindowExW(WS_EX_TOOLWINDOW, pickerClass.lpszClassName, L"ScreenShotPlus 自定义颜色",
+        WS_POPUP, 0, 0, kPickerWidth, kPickerHeight, owner, nullptr, instance, nullptr);
+    if (!picker.window) {
+        DestroyWindow(editor.window); editor.window = nullptr; return false;
+    }
+    ui::Corners(picker.window);
+    PickerRefreshText();
+    return true;
 }
 void OpenEditor(Bitmap& image, const filesystem::path& file) {
     if (!editor.window) return;
@@ -494,16 +704,31 @@ void OpenEditor(Bitmap& image, const filesystem::path& file) {
 void HideEditor() { if (editor.window) ShowWindow(editor.window, SW_HIDE); }
 bool EditorVisible() { return editor.window && IsWindowVisible(editor.window); }
 void DestroyEditor() {
+    if (picker.window) { DestroyWindow(picker.window); picker.window = nullptr; }
+    picker.apply = {};
     if (editor.window) { DestroyWindow(editor.window); editor.window = nullptr; }
     editor.canvas.reset(); editor.shapes.clear(); editor.undone.clear(); editor.done = {};
 }
 void SetDiagnostics(bool enabled) { verbose = enabled; }
 Bitmap* Canvas() { return editor.canvas.get(); }
 RectF CanvasRect() { return editor.canvasRect; }
-RectF SwatchRect(int index) { return Cell(clamp(index, 0, kPresetCount - 1), 66, kSwatchHeight); }
+RectF SwatchRect(int index) { return Cell(clamp(index, 0, kPresetCount - 1), kSwatchTop, kSwatchHeight); }
+RectF CustomSwatchRect() { return Cell(kCustomIndex, kCustomTop, kSwatchHeight); }
 int SelectedColorIndex() { return editor.colorIndex; }
 size_t ShapeCount() { return editor.shapes.size(); }
+const vector<Shape>& Shapes() { return editor.shapes; }
 void UndoLastShape() { Undo(); }
 void RedoLastShape() { Redo(); }
 void RequestSave() { Save(); }
+void OpenColorPickerForTest() { OpenColorPicker(); }
+bool ColorPickerVisible() { return picker.window && IsWindowVisible(picker.window); }
+void SetColorPickerValues(int r, int g, int b) {
+    picker.color = {clamp(r, 0, 255), clamp(g, 0, 255), clamp(b, 0, 255)};
+    PickerRefreshText();
+    InvalidateRect(picker.window, nullptr, FALSE);
+}
+Color ColorPickerPreview() { return PickerColor(); }
+void ConfirmColorPicker() { PickerApply(); }
+void CancelColorPicker() { PickerClose(); }
+RectF ColorPickerTrackRect(int channel) { return PickerTrack(clamp(channel, 0, 2)); }
 }

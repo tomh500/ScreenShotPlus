@@ -21,6 +21,7 @@ struct App {
     TrayIcon tray;
     HICON smallIcon = nullptr;
     wstring notice = L"截图后自动保存，拖动缩略图即可分享。";
+    wstring trayWarning;
     POINT mouse{-1, -1}, pressed{};
     bool mouseDown = false;
     Config config;
@@ -40,7 +41,6 @@ const array<RectF, 5> buttons{{{24, 172, 372, 52}, {24, 236, 372, 44},
 const RectF closeButton{372, 16, 28, 28};
 const RectF retryButton{24, 460, 372, 44};
 constexpr UINT_PTR trayRetryTimer = 4;
-const wstring trayFailure = L"托盘注册失败，正在重试。请保留此面板，或退出后从资源管理器重新启动。";
 void ShowPanel() {
     if (app.exiting) return;
     if (app.phase == App::Editing) { FocusEditor(); return; }
@@ -130,11 +130,12 @@ void AddTray() {
     if (RegisterTrayIcon(app.tray)) {
         SetPropW(app.panel, L"ScreenShotPlus.TrayRegistered", reinterpret_cast<HANDLE>(1));
         KillTimer(app.panel, trayRetryTimer);
-        if (app.notice == trayFailure) app.notice = L"托盘已恢复，关闭面板后可继续截图。";
+        if (!app.trayWarning.empty() && app.notice == app.trayWarning) app.notice = L"托盘已恢复，关闭面板后可继续截图。";
+        app.trayWarning.clear();
     } else {
         RemovePropW(app.panel, L"ScreenShotPlus.TrayRegistered");
         SetTimer(app.panel, trayRetryTimer, 2000, nullptr);
-        app.notice = trayFailure;
+        app.trayWarning = TrayFailureMessage(app.tray); app.notice = app.trayWarning;
         if (!app.exiting && app.phase == App::Idle && !SettingsVisible()) ShowPanel();
     }
     InvalidateRect(app.panel, nullptr, FALSE);
@@ -150,7 +151,7 @@ void DrawPanel(HWND hwnd, HDC target = nullptr) {
     ui::Text(g, L"ScreenShotPlus", {78, 27, 278, 36}, 23, ui::foreground, true);
     ui::Button(g, closeButton, L"×", false, ui::Inside(app.mouse, closeButton));
     ui::Text(g, L"截取 · 保存 · 拖动分享", {24, 92, 372, 28}, 17);
-    ui::Text(g, L"v1.1.1", {328, 98, 68, 22}, 12, ui::accent);
+    ui::Text(g, L"v1.1.2", {328, 98, 68, 22}, 12, ui::accent);
     ui::Text(g, app.notice, {24, 128, 372, 40}, 12, ui::muted);
     const array<wstring, 5> labels{L"开始区域截图   " + HotkeyText(app.config), L"显示最新截图",
         L"打开保存目录", L"设置", L"退出程序"};

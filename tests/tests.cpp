@@ -736,6 +736,24 @@ void ExecutableSmoke(const filesystem::path& executable) {
 }
 }
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && wstring_view(argv[1]) == L"--tray-probe") {
+        cout << "Process integrity RID=" << CurrentProcessIntegrity() << '\n';
+        HWND shell = FindWindowW(L"Shell_TrayWnd", nullptr);
+        DWORD pid = 0; GetWindowThreadProcessId(shell, &pid);
+        cout << "Shell HWND=" << shell << " PID=" << pid << '\n';
+        HWND window = CreateWindowExW(0, L"STATIC", L"ScreenShotPlus diagnostic", WS_POPUP,
+            0, 0, 1, 1, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        TrayIcon tray;
+        tray.data.hWnd = window; tray.data.uID = 99; tray.data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+        tray.data.uCallbackMessage = WM_TRAY; tray.data.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+        wcscpy_s(tray.data.szTip, L"ScreenShotPlus diagnostic");
+        cout << "Data size=" << sizeof(tray.data) << " cbSize=" << tray.data.cbSize << " HWND=" << window << " HICON=" << tray.data.hIcon << '\n';
+        SetLastError(0);
+        const bool result = RegisterTrayIcon(tray);
+        cout << "Registered=" << result << " modern=" << tray.modern << " diagnosticError=" << tray.diagnosticError << '\n';
+        if (result) RemoveTrayIcon(tray);
+        DestroyWindow(window); return result ? 0 : 1;
+    }
     if (argc == 2 && wstring_view(argv[1]) == L"--config-location-probe") {
         wstring warning;
         return ConfigFile() == PortableConfigFile() && LoadConfig(ConfigFile(), warning).previewSeconds == 61 && warning.empty() ? 74 : 94;

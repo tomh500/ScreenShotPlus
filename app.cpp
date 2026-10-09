@@ -11,6 +11,7 @@
 #include "editor.h"
 #include "tray.h"
 #include "instance.h"
+#include "visual_effects.h"
 using namespace std;
 using namespace Gdiplus;
 namespace {
@@ -34,6 +35,7 @@ struct App {
     unique_ptr<Bitmap> latest, pending;
     filesystem::path latestFile;
     POINT latestPoint{}, pendingPoint{};
+    RECT latestOrigin{}, pendingOrigin{};
     bool restorePreview = false;
 } app;
 const array<RectF, 5> buttons{{{24, 172, 372, 52}, {24, 236, 372, 44},
@@ -50,8 +52,8 @@ void ShowPanel() {
     SetForegroundWindow(app.panel); InvalidateRect(app.panel, nullptr, FALSE);
 }
 void Notice(const wstring& text) { app.notice = text; ShowPanel(); }
-void LatestPreview() {
-    if (app.latest) ShowPreview(app.latest.get(), app.latestFile, app.latestPoint, app.config.previewSeconds);
+void LatestPreview(bool captured = false) {
+    if (app.latest) ShowPreview(app.latest.get(), app.latestFile, app.latestPoint, app.config.previewSeconds, captured ? app.latestOrigin : RECT{});
     else Notice(L"还没有截图。先点击“开始区域截图”。");
 }
 void SavePending() {
@@ -63,8 +65,9 @@ void SavePending() {
     if (!ok) { Notice(error); return; }
     HidePreview(); app.latest = move(app.pending); app.latestFile = move(file);
     app.latestPoint = app.pendingPoint;
+    app.latestOrigin = app.pendingOrigin;
     app.notice = L"已自动保存 PNG，可直接拖动缩略图分享。";
-    ShowWindow(app.panel, SW_HIDE); LatestPreview();
+    ShowWindow(app.panel, SW_HIDE); LatestPreview(true);
 }
 void StartCapture() {
     if (app.phase != App::Idle || SettingsVisible() || app.exiting) return;
@@ -80,7 +83,7 @@ void StartCapture() {
             if (!failure.empty()) Notice(failure);
             return;
         }
-        app.pending = move(image); app.pendingPoint = point; SavePending();
+        app.pending = move(image); app.pendingPoint = point; app.pendingOrigin = LastCaptureRect(); SavePending();
     }, error)) {
         app.phase = App::Idle;
         if (app.restorePreview && app.latest) LatestPreview();
@@ -90,8 +93,11 @@ void StartCapture() {
 void DragLatest() {
     if (app.phase != App::Idle || !app.latest || SettingsVisible()) return;
     app.phase = App::Dragging;
+    BeginDragVisual(*app.latest, PreviewImageScreenRect());
     DWORD effect = DROPEFFECT_NONE;
-    const HRESULT result = DragFile(app.latestFile, effect);
+    const HRESULT result = DragFile(app.latestFile, effect, DragVisualFeedback);
+    const bool accepted = result == DRAGDROP_S_DROP && effect == DROPEFFECT_COPY;
+    EndDragVisual(accepted); PreviewDragResult(accepted);
     app.phase = App::Idle;
     if (FAILED(result)) Notice(L"拖放失败；请确认截图文件仍存在，且接收程序支持文件拖入。");
     else {
@@ -151,7 +157,7 @@ void DrawPanel(HWND hwnd, HDC target = nullptr) {
     ui::Text(g, L"ScreenShotPlus", {78, 27, 278, 36}, 23, ui::foreground, true);
     ui::Button(g, hwnd, closeButton, L"×", false, ui::Inside(app.mouse, closeButton));
     ui::Text(g, L"截取 · 保存 · 拖动分享", {24, 92, 372, 28}, 17);
-    ui::Text(g, L"v1.2.0", {328, 98, 68, 22}, 12, ui::accent);
+    ui::Text(g, L"v1.3.0", {328, 98, 68, 22}, 12, ui::accent);
     ui::Text(g, app.notice, {24, 128, 372, 40}, 12, ui::muted);
     const array<wstring, 5> labels{L"开始区域截图   " + HotkeyText(app.config), L"显示最新截图",
         L"打开保存目录", L"设置", L"退出程序"};
@@ -225,6 +231,7 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
         return 0;
     }
     case WM_DESTROY:
+        CancelVisualEffects();
         app.exiting = true; CancelSelection();
         KillTimer(hwnd, trayRetryTimer); RemoveTrayIcon(app.tray);
         ReleaseHotkeys(hwnd, app.hotkeys);

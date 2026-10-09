@@ -1,5 +1,6 @@
 #include "capture.h"
 #include "ui.h"
+#include "visual_effects.h"
 using namespace std;
 using namespace Gdiplus;
 RECT SelectionRect(POINT a, POINT b, int width, int height) {
@@ -13,8 +14,12 @@ namespace {
 struct Selection {
     HWND window = nullptr;
     HBITMAP handle = nullptr;
+    HBITMAP dimmed = nullptr;
+    HDC frozenDC = nullptr, dimDC = nullptr;
+    HGDIOBJ frozenOld = nullptr, dimOld = nullptr;
     unique_ptr<Bitmap> image;
     RECT desktop{};
+    RECT lastCapture{};
     POINT begin{}, end{};
     bool active = false, finishing = false;
     CaptureDone done;
@@ -22,8 +27,14 @@ struct Selection {
 
 void ClearImage() {
     selection.image.reset();
+    if (selection.frozenOld && selection.frozenOld != HGDI_ERROR) SelectObject(selection.frozenDC, selection.frozenOld);
+    if (selection.dimOld && selection.dimOld != HGDI_ERROR) SelectObject(selection.dimDC, selection.dimOld);
+    if (selection.frozenDC) DeleteDC(selection.frozenDC);
+    if (selection.dimDC) DeleteDC(selection.dimDC);
+    if (selection.dimmed) DeleteObject(selection.dimmed);
     if (selection.handle) DeleteObject(selection.handle);
-    selection.handle = nullptr;
+    selection.handle = selection.dimmed = nullptr;
+    selection.frozenDC = selection.dimDC = nullptr; selection.frozenOld = selection.dimOld = nullptr;
 }
 void Finish(bool accept, wstring error = {}) {
     if (selection.finishing || !selection.window) return;
@@ -35,6 +46,8 @@ void Finish(bool accept, wstring error = {}) {
         cropped.reset(selection.image->Clone(Rect(r.left, r.top, r.right - r.left, r.bottom - r.top), PixelFormat32bppRGB));
         if (!cropped || cropped->GetLastStatus() != Ok) { cropped.reset(); error = L"裁剪图像失败，请重试。"; }
     }
+    selection.lastCapture = cropped ? RECT{selection.desktop.left + r.left, selection.desktop.top + r.top,
+        selection.desktop.left + r.right, selection.desktop.top + r.bottom} : RECT{};
     POINT point{selection.desktop.left + selection.end.x, selection.desktop.top + selection.end.y};
     CaptureDone done = move(selection.done);
     selection.active = false;
@@ -47,46 +60,87 @@ void Finish(bool accept, wstring error = {}) {
     selection.finishing = false;
     if (done) done(move(cropped), point, move(error));
 }
-void DrawSelection(HWND hwnd) {
-    ui::Paint paint(hwnd); Graphics g(paint.buffer);
-    g.SetSmoothingMode(SmoothingModeAntiAlias);
-    g.DrawImage(selection.image.get(), 0, 0, paint.width, paint.height);
-    SolidBrush shade(Color(155, 0, 0, 0));
-    g.FillRectangle(&shade, 0, 0, paint.width, paint.height);
+void DrawSelection(HWND hwnd, HDC target = nullptr) {
+    ui::Paint paint(hwnd, target, false);
+    const float entrance = ui::Entrance(hwnd), scale = ui::Scale(hwnd);
+    BitBlt(paint.buffer, 0, 0, paint.width, paint.height, selection.dimDC, 0, 0, SRCCOPY);
+    if (entrance < 1) {
+        BLENDFUNCTION blend{AC_SRC_OVER, 0, static_cast<BYTE>((1 - entrance) * 255), 0};
+        AlphaBlend(paint.buffer, 0, 0, paint.width, paint.height, selection.frozenDC, 0, 0, paint.width, paint.height, blend);
+    }
     const RECT r = SelectionRect(selection.begin, selection.end, paint.width, paint.height);
-    if (selection.active && r.right > r.left && r.bottom > r.top) {
-        const int w = r.right - r.left, h = r.bottom - r.top;
-        g.DrawImage(selection.image.get(), Rect(r.left, r.top, w, h), r.left, r.top, w, h, UnitPixel);
-        Pen pen(ui::accent, 2); g.DrawRectangle(&pen, r.left, r.top, w - 1, h - 1);
-        const float scale = ui::Scale(hwnd);
-        const float labelWidth = 220 * scale, labelHeight = 38 * scale;
+    const int w = r.right - r.left, h = r.bottom - r.top;
+    if (selection.active && w > 0 && h > 0) BitBlt(paint.buffer, r.left, r.top, w, h, selection.frozenDC, r.left, r.top, SRCCOPY);
+    Graphics g(paint.buffer);
+    g.SetSmoothingMode(SmoothingModeAntiAlias);
+    g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+    const float reveal = ui::AnimateValue(hwnd, 1, selection.active ? 1.0f : 0.0f, 0.18);
+    if (selection.active && w > 0 && h > 0) {
+        const RectF bounds{static_cast<float>(r.left), static_cast<float>(r.top), static_cast<float>(w - 1), static_cast<float>(h - 1)};
+        Pen halo(Color(40, ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()), 6 * scale);
+        Pen outline(Color(200, ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()), max(1.0f, scale));
+        g.DrawRectangle(&halo, bounds); g.DrawRectangle(&outline, bounds);
+        const float length = min({(8 + 10 * reveal) * scale, w * 0.35f, h * 0.35f});
+        Pen corner(ui::accent, 2.5f * scale); corner.SetStartCap(LineCapRound); corner.SetEndCap(LineCapRound);
+        for (int i = 0; i < 4; ++i) {
+            const float x = i & 1 ? bounds.GetRight() : bounds.X, y = i & 2 ? bounds.GetBottom() : bounds.Y;
+            g.DrawLine(&corner, x, y, x + (i & 1 ? -length : length), y);
+            g.DrawLine(&corner, x, y, x, y + (i & 2 ? -length : length));
+        }
+        const float labelWidth = 252 * scale, labelHeight = 42 * scale;
         const float x = clamp(static_cast<float>(r.left), 0.0f, max(0.0f, paint.width - labelWidth));
-        const float y = clamp(static_cast<float>(r.bottom + 10), 0.0f, max(0.0f, paint.height - labelHeight));
-        ui::Round(g, {x, y, labelWidth, labelHeight}, 8 * scale, ui::background);
-        ui::Text(g, to_wstring(w) + L" × " + to_wstring(h) + L" px", {x + 12 * scale, y + 7 * scale,
-            labelWidth - 24 * scale, labelHeight}, 14 * scale, ui::accent);
+        float y = r.bottom + (10 + (1 - reveal) * 8) * scale;
+        if (y + labelHeight > paint.height) y = r.top - labelHeight - 10 * scale;
+        y = clamp(y, 0.0f, max(0.0f, paint.height - labelHeight));
+        ui::Round(g, {x, y + 2 * scale, labelWidth, labelHeight}, 12 * scale, Color(50, 0, 0, 0));
+        ui::Round(g, {x, y, labelWidth, labelHeight}, 12 * scale, ui::background);
+        ui::Border(g, {x, y, labelWidth, labelHeight}, 12 * scale, Color(130, 105, 232, 187));
+        ui::Text(g, to_wstring(w) + L" × " + to_wstring(h) + L" px", {x + 14 * scale, y + 10 * scale,
+            170 * scale, labelHeight}, 14 * scale, ui::accent, true);
+        ui::Text(g, L"松开保存", {x + 172 * scale, y + 12 * scale, 72 * scale, 24 * scale}, 11 * scale, ui::muted);
     } else {
-        const float scale = ui::Scale(hwnd);
-        ui::Round(g, {20 * scale, 20 * scale, 400 * scale, 52 * scale}, 12 * scale, ui::background);
-        ui::Text(g, L"拖动框选区域 · 松开保存 · Esc / 右键取消",
-            {36 * scale, 35 * scale, 368 * scale, 28 * scale}, 14 * scale);
+        POINT point{selection.end.x + selection.desktop.left, selection.end.y + selection.desktop.top};
+        MONITORINFO info{sizeof(info)}; GetMonitorInfoW(MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST), &info);
+        const float width = min(464 * scale, static_cast<float>(info.rcWork.right - info.rcWork.left) - 24 * scale);
+        const float x = info.rcWork.left - selection.desktop.left + (info.rcWork.right - info.rcWork.left - width) / 2;
+        const float y = info.rcWork.top - selection.desktop.top + (24 - 14 * (1 - entrance)) * scale;
+        const auto saved = g.Save();
+        g.TranslateTransform(x + width / 2, y + 33 * scale);
+        const float spring = 0.94f + 0.06f * ui::SpringReveal(ui::EntranceProgress(hwnd));
+        g.ScaleTransform(spring, spring); g.TranslateTransform(-width / 2, -33 * scale);
+        ui::Round(g, {0, 3 * scale, width, 66 * scale}, 18 * scale, Color(60, 0, 0, 0));
+        ui::Round(g, {0, 0, width, 66 * scale}, 18 * scale, ui::background);
+        ui::Border(g, {0, 0, width, 66 * scale}, 18 * scale, Color(130, 105, 232, 187));
+        ui::Round(g, {16 * scale, 17 * scale, 32 * scale, 32 * scale}, 9 * scale, ui::accent);
+        ui::Text(g, L"＋", {19 * scale, 18 * scale, 30 * scale, 28 * scale}, 21 * scale, ui::background, true);
+        ui::Text(g, L"选择你的截图区域", {62 * scale, 11 * scale, width - 74 * scale, 27 * scale}, 16 * scale, ui::foreground, true);
+        ui::Text(g, L"拖动框选 · 松开保存 · Esc / 右键取消", {62 * scale, 37 * scale, width - 74 * scale, 23 * scale}, 11 * scale, ui::muted);
+        g.Restore(saved);
+        const float cx = static_cast<float>(selection.end.x), cy = static_cast<float>(selection.end.y);
+        Pen guide(Color(48, 105, 232, 187), max(1.0f, scale));
+        g.DrawLine(&guide, 0.0f, cy, static_cast<float>(paint.width), cy);
+        g.DrawLine(&guide, cx, 0.0f, cx, static_cast<float>(paint.height));
+        Pen ring(Color(static_cast<BYTE>(entrance * 180), 105, 232, 187), 1.5f * scale);
+        const float radius = (8 + 12 * (1 - entrance)) * scale;
+        g.DrawEllipse(&ring, cx - radius, cy - radius, radius * 2, radius * 2);
     }
 }
 LRESULT CALLBACK SelectionProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (ui::MotionMessage(hwnd, msg, wparam, lparam)) return 0;
     switch (msg) {
     case WM_PAINT:
         if (selection.image) DrawSelection(hwnd);
         else { PAINTSTRUCT ps; BeginPaint(hwnd, &ps); EndPaint(hwnd, &ps); }
         return 0;
+    case WM_PRINTCLIENT: if (selection.image) DrawSelection(hwnd, reinterpret_cast<HDC>(wparam)); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_LBUTTONDOWN:
         selection.begin = selection.end = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         selection.active = true; SetCapture(hwnd); InvalidateRect(hwnd, nullptr, FALSE); return 0;
     case WM_MOUSEMOVE:
-        if (selection.active) {
-            selection.end = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
-            InvalidateRect(hwnd, nullptr, FALSE);
-        }
+        selection.end = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        ui::MotionMonitor(hwnd, MonitorFromPoint({selection.desktop.left + selection.end.x, selection.desktop.top + selection.end.y}, MONITOR_DEFAULTTONEAREST));
+        InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     case WM_LBUTTONUP:
         if (selection.active) { selection.end = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)}; Finish(true); }
@@ -107,6 +161,7 @@ LRESULT CALLBACK SelectionProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam
 }
 bool BeginSelection(HINSTANCE instance, CaptureDone done, wstring& error) {
     if (selection.window) { error = L"已有截图正在进行。"; return false; }
+    CancelVisualEffects(); DwmFlush();
     const int x = GetSystemMetrics(SM_XVIRTUALSCREEN), y = GetSystemMetrics(SM_YVIRTUALSCREEN);
     const int width = GetSystemMetrics(SM_CXVIRTUALSCREEN), height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
     if (width <= 0 || height <= 0) { error = L"无法获取桌面尺寸。"; return false; }
@@ -130,6 +185,19 @@ bool BeginSelection(HINSTANCE instance, CaptureDone done, wstring& error) {
     if (!ok || !selection.image || selection.image->GetLastStatus() != Ok) {
         ClearImage(); error = L"无法捕获桌面，请检查会话是否锁定。"; return false;
     }
+    // Precompute the dimmed desktop once; entry frames only blend two native
+    // cached surfaces. Crop pixels always come from the untouched image.
+    selection.frozenDC = CreateCompatibleDC(nullptr); selection.dimDC = CreateCompatibleDC(nullptr);
+    selection.dimmed = CreateBitmap(width, height, 1, 32, nullptr);
+    if (selection.frozenDC && selection.dimDC && selection.dimmed) {
+        selection.frozenOld = SelectObject(selection.frozenDC, selection.handle);
+        selection.dimOld = SelectObject(selection.dimDC, selection.dimmed);
+    }
+    if (!selection.frozenOld || !selection.dimOld || selection.frozenOld == HGDI_ERROR || selection.dimOld == HGDI_ERROR ||
+        !BitBlt(selection.dimDC, 0, 0, width, height, selection.frozenDC, 0, 0, SRCCOPY)) {
+        ClearImage(); error = L"无法准备截图绘图缓冲，请重试。"; return false;
+    }
+    { Graphics dim(selection.dimDC); SolidBrush shade(Color(155, 0, 0, 0)); dim.FillRectangle(&shade, 0, 0, width, height); }
     WNDCLASSEXW cls{sizeof(cls)};
     cls.hInstance = instance; cls.lpfnWndProc = SelectionProc;
     cls.hCursor = LoadCursorW(nullptr, IDC_CROSS); cls.lpszClassName = L"ScreenShotPlus.Selection";
@@ -137,12 +205,15 @@ bool BeginSelection(HINSTANCE instance, CaptureDone done, wstring& error) {
     if (!GetClassInfoExW(instance, cls.lpszClassName, &existing) && !RegisterClassExW(&cls)) {
         ClearImage(); error = L"无法初始化框选窗口。"; return false;
     }
-    selection.done = move(done); selection.begin = {}; selection.end = {}; selection.active = false;
+    selection.done = move(done); selection.begin = {}; selection.active = false; selection.lastCapture = {};
+    GetCursorPos(&selection.end); selection.end.x -= x; selection.end.y -= y;
     selection.window = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, cls.lpszClassName,
         L"ScreenShotPlus 区域截图", WS_POPUP, x, y, width, height, nullptr, nullptr, instance, nullptr);
     if (!selection.window) { ClearImage(); selection.done = {}; error = L"无法创建框选窗口。"; return false; }
     ShowWindow(selection.window, SW_SHOW); SetForegroundWindow(selection.window);
+    POINT cursor{}; GetCursorPos(&cursor); ui::MotionMonitor(selection.window, MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST));
     SetFocus(selection.window); UpdateWindow(selection.window);
     return true;
 }
 void CancelSelection() { Finish(false); }
+RECT LastCaptureRect() { return selection.lastCapture; }

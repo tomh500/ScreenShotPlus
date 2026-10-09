@@ -11,6 +11,7 @@
 #include "editor.h"
 #include "instance.h"
 #include "tray.h"
+#include "visual_effects.h"
 #include <nlohmann/json.hpp>
 #include <atomic>
 #include <iostream>
@@ -56,9 +57,9 @@ void Pointer(HWND hwnd, UINT message, int x, int y, WPARAM keys = 0) {
     const float scale = ui::Scale(hwnd);
     SendMessageW(hwnd, message, keys, MAKELPARAM(static_cast<int>(x * scale), static_cast<int>(y * scale)));
 }
-void Snapshot(HWND hwnd, const filesystem::path& folder) {
+void Snapshot(HWND hwnd, const filesystem::path& folder, bool settle = true) {
     // Acceptance captures show the settled layout, not the entrance veil.
-    Pump(300);
+    if (settle) Pump(300);
     UpdateWindow(hwnd);
     RECT rect{}; GetClientRect(hwnd, &rect);
     HDC dc = GetDC(hwnd), memory = CreateCompatibleDC(dc);
@@ -98,6 +99,14 @@ void AnimationTiming() {
     Check(abs(curve.Value(10.08) - before) < 0.0001f && curve.Value(10.25) == 0, "interrupted transition reverses continuously");
     curve.Set(1, 11, 0.2, false);
     Check(curve.Value(11) == 1 && !curve.Active(11), "reduced motion settles immediately");
+    Check(ui::SpringReveal(0) == 0 && ui::SpringReveal(1) == 1, "spring lands at exact endpoints");
+    float peak = 0;
+    for (int frame = 0; frame <= 240; ++frame) {
+        const float value = ui::SpringReveal(frame / 240.0f);
+        Check(isfinite(value) && value >= 0 && value < 1.10f, "spring overshoot stays subtle and bounded");
+        peak = max(peak, value);
+    }
+    Check(peak > 1.01f, "spring has a restrained settling rebound");
 }
 struct MotionFixture { bool hovered = false, enabled = false; };
 LRESULT CALLBACK MotionFixtureProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -173,6 +182,57 @@ void AnimationUi(HINSTANCE instance, const filesystem::path& root) {
         }
     }
     UnregisterClassW(cls.lpszClassName, instance);
+}
+void RichEffectsUi(HINSTANCE instance, const filesystem::path& root) {
+    Bitmap image(320, 180, PixelFormat32bppRGB);
+    { Graphics g(&image); g.Clear(Color(255, 37, 122, 183)); ui::Text(g, L"ScreenShotPlus", {32, 44, 280, 38}, 25, ui::foreground, true);
+        ui::Text(g, L"截图 · 拖动 · 分享", {34, 98, 280, 30}, 16); }
+    filesystem::path file; wstring error;
+    Check(SavePng(image, root / L"effect-source", file, error), "save effects fixture source");
+    Check(InitPreview(instance, [] {}), "initialize effects preview");
+    const HWND foreground = GetForegroundWindow();
+    const RECT origin{300, 200, 940, 560};
+    ShowPreview(&image, file, {300, 300}, 0, origin);
+    Pump(70);
+    auto info = GetVisualEffectInfo();
+    if (info.window) {
+        Check(info.presented && info.error == 0, "layered flight surface presented with alpha");
+        Snapshot(info.window, root / L"capture-flight-ui", false);
+    }
+    Pump(430); Check(!GetVisualEffectInfo().window, "capture flight ends and releases its window");
+    Check(GetForegroundWindow() == foreground, "flight and preview do not activate");
+    const RECT source = PreviewImageScreenRect();
+    Check(source.right > source.left && source.bottom > source.top, "preview maps its image to physical screen pixels");
+    const DWORD baseline = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+    for (int iteration = 0; iteration < 3; ++iteration) {
+        Check(BeginDragVisual(image, source), "start floating drag card");
+        Pump(260); info = GetVisualEffectInfo();
+        Check(info.window && info.dragging && info.presented && !info.error, "drag card runs while dragging");
+        const auto style = GetWindowLongPtrW(info.window, GWL_EXSTYLE);
+        Check((style & (WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE)) == (WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE), "drag card is layered, transparent to input and nonactivating");
+        RECT rect{}; GetWindowRect(info.window, &rect);
+        Check(WindowFromPoint({(rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2}) != info.window,
+            "floating card does not intercept underlying drop hit testing");
+        const auto frames = ui::GetMotionInfo(info.window).frames;
+        DragVisualFeedback(DROPEFFECT_COPY); Pump(150);
+        Check(GetVisualEffectInfo().effect == DROPEFFECT_COPY && ui::GetMotionInfo(info.window).frames > frames, "copy feedback and pointer-follow frames update");
+        if (iteration == 0) Snapshot(info.window, root / L"drag-copy-ui", false);
+        if (iteration == 1) {
+            EndDragVisual(true); Pump(230); Check(!GetVisualEffectInfo().window, "accepted drop contracts and closes");
+        } else {
+            DragVisualFeedback(DROPEFFECT_NONE); Pump(150);
+            if (iteration == 0) Snapshot(info.window, root / L"drag-unavailable-ui", false);
+            EndDragVisual(false);
+            Check(GetVisualEffectInfo().returning, "canceled drop starts return transition");
+            Pump(330); Check(!GetVisualEffectInfo().window, "canceled card returns and releases resources");
+        }
+        Check(filesystem::exists(file), "drag visual never removes source PNG");
+        Check(GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) <= baseline + 2, "layered drag DIBs and DCs released");
+    }
+    Check(BeginDragVisual(image, source), "start effect before new capture");
+    Check(BeginSelection(instance, [](unique_ptr<Bitmap>, POINT, wstring) {}, error), "new capture cancels old visual before desktop freeze");
+    Check(!GetVisualEffectInfo().window, "floating card excluded from next screenshot"); CancelSelection();
+    DestroyPreview();
 }
 void Geometry() {
     RECT r = SelectionRect({90, 75}, {-20, 10}, 100, 80);
@@ -554,14 +614,19 @@ void CaptureAndPreview(HINSTANCE instance, const filesystem::path& root) {
     }, error), "desktop freeze");
     HWND overlay = FindWindowW(L"ScreenShotPlus.Selection", nullptr);
     Check(overlay != nullptr, "selection overlay");
+    Snapshot(overlay, root / L"capture-ready-ui");
+    cout << "Capture entry target: " << ui::GetMotionInfo(overlay).refreshRate << " Hz, frame messages: " << ui::GetMotionInfo(overlay).frames << '\n';
     const int x = 150 - GetSystemMetrics(SM_XVIRTUALSCREEN), y = 150 - GetSystemMetrics(SM_YVIRTUALSCREEN);
     SendMessageW(overlay, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x + 80, y + 60));
     SendMessageW(overlay, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(x, y));
+    Snapshot(overlay, root / L"capture-selection-ui");
     SendMessageW(overlay, WM_LBUTTONUP, 0, MAKELPARAM(x, y));
     Check(called && result && error.empty() && result->GetWidth() == 80 && result->GetHeight() == 60, "live reverse selection crop");
     Color pixel; result->GetPixel(20, 20, &pixel);
     Check(pixel.GetR() == 29 && pixel.GetG() == 137 && pixel.GetB() == 211 && pixel.GetA() == 255, "frozen desktop pixel / alpha");
     Check(finished.x == 150 && finished.y == 150, "selection end physical point");
+    const RECT captured = LastCaptureRect();
+    Check(captured.left == 150 && captured.top == 150 && captured.right == 230 && captured.bottom == 210, "reverse selection origin for flight uses physical pixels");
     const DWORD resources = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
     for (int i = 0; i < 3; ++i) {
         called = false;
@@ -887,7 +952,10 @@ int wmain(int argc, wchar_t** argv) {
     try {
         filesystem::create_directories(root);
         AnimationTiming(); cout << "PASS fractional refresh / 120 fallback / interrupted curves / time-based duration / reduced motion\n";
-        if (liveUi) { AnimationUi(GetModuleHandleW(nullptr), root); cout << "PASS animation frames / hover / toggle / press / idle / hide / reopen / GDI lifetime\n"; }
+        if (liveUi) {
+            AnimationUi(GetModuleHandleW(nullptr), root); cout << "PASS animation frames / hover / toggle / press / idle / hide / reopen / GDI lifetime\n";
+            RichEffectsUi(GetModuleHandleW(nullptr), root); cout << "PASS layered flight / drag card / copy feedback / cancel return / accepted drop / input transparency / resource lifetime (visual fixture, not client acceptance)\n";
+        }
         if (!animationOnly) {
         Geometry(); cout << "PASS selection geometry\n";
         InstanceProcesses(filesystem::absolute(argv[0])); cout << "PASS 8 concurrent processes / single-instance mutex / restart\n";
@@ -914,6 +982,6 @@ int wmain(int argc, wchar_t** argv) {
         cout << "Monitors actually present: " << GetSystemMetrics(SM_CMONITORS) << '\n';
         wcout << L"Test artifacts: " << root.wstring() << L'\n';
     } catch (const exception& e) { cerr << "FAIL: " << e.what() << '\n'; code = 1; }
-    CancelSelection(); DestroyEditor(); DestroySettings(); DestroyPreview();
+    CancelVisualEffects(); CancelSelection(); DestroyEditor(); DestroySettings(); DestroyPreview();
     GdiplusShutdown(token); OleUninitialize(); return code;
 }

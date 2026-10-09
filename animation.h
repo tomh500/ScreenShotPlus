@@ -21,10 +21,15 @@ struct MotionInfo {
 double RefreshRate(HWND hwnd);
 double RefreshRateValue(UINT32 numerator, UINT32 denominator);
 bool MotionMessage(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
-void RestartMotion(HWND hwnd);
+void RestartMotion(HWND hwnd, double seconds = 0.26);
 void BeginMotionPaint(HWND hwnd);
 void EndMotionPaint(HWND hwnd);
 float Entrance(HWND hwnd);
+float EntranceProgress(HWND hwnd);
+float SpringReveal(float progress);
+float AnimateValue(HWND hwnd, unsigned key, float target, double seconds, float initial = 0);
+void ContinuousMotion(HWND hwnd, bool active);
+void MotionMonitor(HWND hwnd, HMONITOR monitor);
 Interaction AnimateControl(HWND hwnd, Gdiplus::RectF rect, bool hovered, bool selected = false);
 MotionInfo GetMotionInfo(HWND hwnd);
 }

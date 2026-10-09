@@ -102,16 +102,18 @@ struct Control {
     Tween hover, press, selected;
     unsigned serial = 0;
 };
+struct ValueTrack { unsigned key = 0, serial = 0; Tween tween; };
 struct Motion {
     UINT_PTR cookie = 0;
     HMONITOR monitor = nullptr;
     double rate = 120, paintTime = 0;
     unsigned long long frames = 0;
     unsigned serial = 0;
-    bool enabled = true, running = false, down = false;
+    bool enabled = true, running = false, down = false, continuous = false;
     POINT pressed{-1, -1}, mouse{-1, -1};
     Tween entrance;
     vector<Control> controls;
+    vector<ValueTrack> values;
 };
 Motion* State(HWND hwnd) { return static_cast<Motion*>(GetPropW(hwnd, stateProperty)); }
 void Stop(HWND hwnd, Motion& state) {
@@ -126,6 +128,7 @@ void Settle(Motion& state) {
     const auto settle = [](Tween& t) { t.from = t.target; t.duration = 0; };
     settle(state.entrance);
     for (auto& c : state.controls) { settle(c.hover); settle(c.press); settle(c.selected); }
+    for (auto& value : state.values) settle(value.tween);
 }
 }
 
@@ -146,9 +149,9 @@ double RefreshRateValue(UINT32 numerator, UINT32 denominator) {
     const double value = static_cast<double>(numerator) / denominator;
     return isfinite(value) && value > 1 && value <= 1000 ? value : 120;
 }
-double RefreshRate(HWND hwnd) {
+double MonitorRate(HMONITOR display) {
     MONITORINFOEXW monitor{}; monitor.cbSize = sizeof(monitor);
-    if (!GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor)) return 120;
+    if (!GetMonitorInfoW(display, &monitor)) return 120;
     // CCD preserves rates such as 60000/1001 instead of rounding to 60.
     for (int attempt = 0; attempt < 3; ++attempt) {
         UINT32 pathsCount = 0, modesCount = 0;
@@ -180,6 +183,7 @@ double RefreshRate(HWND hwnd) {
         return RefreshRateValue(mode.dmDisplayFrequency, 1);
     return 120;
 }
+double RefreshRate(HWND hwnd) { return MonitorRate(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)); }
 bool MotionMessage(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message == WM_NCDESTROY) ReleasePaintBuffer(hwnd);
     if (message == WM_NCCREATE) {
@@ -206,7 +210,7 @@ bool MotionMessage(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         return true;
     case WM_SHOWWINDOW:
         if (wparam) RestartMotion(hwnd);
-        else { state->down = false; Settle(*state); Stop(hwnd, *state); }
+        else { state->down = false; state->continuous = false; Settle(*state); Stop(hwnd, *state); }
         break;
     case WM_SIZE:
         if (wparam == SIZE_MINIMIZED) Stop(hwnd, *state);
@@ -236,12 +240,12 @@ bool MotionMessage(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     }
     return false;
 }
-void RestartMotion(HWND hwnd) {
+void RestartMotion(HWND hwnd, double seconds) {
     if (auto state = State(hwnd)) {
         state->enabled = AnimationsEnabled() && Clock().Ready();
-        state->down = false; state->mouse = {-1, -1}; state->controls.clear();
+        state->down = false; state->mouse = {-1, -1}; state->controls.clear(); state->values.clear();
         UpdateRate(hwnd, *state);
-        state->entrance = {}; state->entrance.Set(1, Now(), 0.26, state->enabled);
+        state->entrance = {}; state->entrance.Set(1, Now(), seconds, state->enabled);
         InvalidateRect(hwnd, nullptr, FALSE);
     }
 }
@@ -252,14 +256,52 @@ void EndMotionPaint(HWND hwnd) {
     auto state = State(hwnd);
     if (!state) return;
     erase_if(state->controls, [&](const auto& control) { return control.serial != state->serial; });
+    erase_if(state->values, [&](const auto& value) { return value.serial != state->serial; });
     const double now = state->paintTime;
     bool active = state->entrance.Active(now);
     for (const auto& c : state->controls) active |= c.hover.Active(now) || c.press.Active(now) || c.selected.Active(now);
-    state->running = state->enabled && active && IsWindowVisible(hwnd) && !IsIconic(hwnd);
+    for (const auto& value : state->values) active |= value.tween.Active(now);
+    // Pointer-following is functional feedback, including with reduced motion.
+    state->running = (state->continuous || (state->enabled && active)) && IsWindowVisible(hwnd) && !IsIconic(hwnd);
     Clock().Schedule(hwnd, state->cookie, state->rate, state->running);
 }
 float Entrance(HWND hwnd) {
     auto state = State(hwnd); return state ? state->entrance.Value(state->paintTime) : 1;
+}
+float EntranceProgress(HWND hwnd) {
+    auto state = State(hwnd);
+    if (!state || state->entrance.duration <= 0) return 1;
+    return static_cast<float>(clamp((state->paintTime - state->entrance.start) / state->entrance.duration, 0.0, 1.0));
+}
+float SpringReveal(float progress) {
+    const float t = clamp(progress, 0.0f, 1.0f);
+    if (t == 0 || t == 1) return t;
+    const auto curve = [](float p) { return 1 - exp(-8 * p) * (cos(10 * p) + 0.8f * sin(10 * p)); };
+    return curve(t) / curve(1);
+}
+float AnimateValue(HWND hwnd, unsigned key, float target, double seconds, float initial) {
+    auto state = State(hwnd);
+    if (!state) return target;
+    auto it = find_if(state->values.begin(), state->values.end(), [&](const auto& value) { return value.key == key; });
+    if (it == state->values.end()) {
+        state->values.push_back({key}); it = prev(state->values.end());
+        it->tween.Set(initial, state->paintTime, 0, false);
+    }
+    it->serial = state->serial;
+    it->tween.Set(target, state->paintTime, seconds, state->enabled);
+    return it->tween.Value(state->paintTime);
+}
+void ContinuousMotion(HWND hwnd, bool active) {
+    if (auto state = State(hwnd)) {
+        state->continuous = active;
+        if (active) { state->running = IsWindowVisible(hwnd) != FALSE; Clock().Schedule(hwnd, state->cookie, state->rate, state->running); }
+    }
+}
+void MotionMonitor(HWND hwnd, HMONITOR monitor) {
+    if (auto state = State(hwnd); state && monitor && state->monitor != monitor) {
+        state->monitor = monitor; state->rate = MonitorRate(monitor);
+        if (state->running) Clock().Schedule(hwnd, state->cookie, state->rate, true);
+    }
 }
 Interaction AnimateControl(HWND hwnd, RectF rect, bool hovered, bool selected) {
     auto state = State(hwnd);

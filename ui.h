@@ -12,8 +12,8 @@ struct Paint {
     HBITMAP bitmap = nullptr;
     HGDIOBJ old = nullptr;
     int width = 0, height = 0;
-    bool printing = false, cached = false;
-    explicit Paint(HWND hwnd, HDC target = nullptr);
+    bool printing = false, cached = false, reveal = true;
+    explicit Paint(HWND hwnd, HDC target = nullptr, bool fade = true);
     ~Paint();
     Paint(const Paint&) = delete;
     Paint& operator=(const Paint&) = delete;

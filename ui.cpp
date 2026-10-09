@@ -28,7 +28,7 @@ Color Mix(Color a, Color b, float t) {
     return Color(mix(a.GetA(), b.GetA()), mix(a.GetR(), b.GetR()), mix(a.GetG(), b.GetG()), mix(a.GetB(), b.GetB()));
 }
 }
-Paint::Paint(HWND hwnd, HDC target) : window(hwnd), printing(target != nullptr) {
+Paint::Paint(HWND hwnd, HDC target, bool fade) : window(hwnd), printing(target != nullptr), reveal(fade) {
     BeginMotionPaint(hwnd);
     dc = target ? target : BeginPaint(window, &ps);
     RECT r{}; GetClientRect(window, &r);
@@ -57,7 +57,7 @@ Paint::~Paint() {
     // Soft reveal blends the finished frame, including text and images. The
     // hit rectangles and image pixel coordinates remain stationary.
     const float entrance = Entrance(window);
-    if (entrance < 1) {
+    if (reveal && entrance < 1) {
         Graphics g(buffer);
         SolidBrush veil(Color(static_cast<BYTE>((1 - entrance) * 230), background.GetR(), background.GetG(), background.GetB()));
         g.FillRectangle(&veil, 0, 0, width, height);

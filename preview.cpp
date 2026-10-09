@@ -1,5 +1,6 @@
 #include "preview.h"
 #include "ui.h"
+#include "visual_effects.h"
 using namespace std;
 using namespace Gdiplus;
 namespace {
@@ -12,28 +13,39 @@ struct Preview {
     bool pressing = false, dragging = false;
     ULONGLONG remaining = 0, lastTick = 0;
     function<void()> drag, edit;
+    wstring dragStatus;
 } preview;
 const RectF closeButton{278, 12, 28, 28}, imageRect{16, 52, 288, 166};
 void DrawPreview(HWND hwnd, HDC target = nullptr) {
     ui::Paint paint(hwnd, target); Graphics g(paint.buffer); ui::Prepare(g, hwnd);
-    ui::Text(g, L"已保存 PNG", {16, 17, 240, 26}, 14, ui::accent, true);
+    const float progress = ui::EntranceProgress(hwnd);
+    const float check = clamp((progress - 0.15f) / 0.70f, 0.0f, 1.0f);
+    Pen tick(ui::accent, 2.5f); tick.SetStartCap(LineCapRound); tick.SetEndCap(LineCapRound);
+    if (check > 0) {
+        const float first = min(1.0f, check * 3);
+        g.DrawLine(&tick, 17.0f, 25.0f, 17 + first * 4, 25 + first * 4);
+        if (check > 1.0f / 3) { const float second = (check - 1.0f / 3) * 1.5f; g.DrawLine(&tick, 21.0f, 29.0f, 21 + second * 9, 29 - second * 10); }
+    }
+    ui::Text(g, preview.dragStatus.empty() ? L"已保存 PNG" : preview.dragStatus, {40, 17, 228, 26}, 14, ui::accent, true);
     ui::Button(g, hwnd, closeButton, L"×", false, ui::Inside(preview.mouse, closeButton));
     ui::Round(g, imageRect, 10, ui::surface);
     const auto motion = ui::AnimateControl(hwnd, imageRect, ui::Inside(preview.mouse, imageRect));
+    const float lifted = ui::AnimateValue(hwnd, 10, preview.dragging ? 1.0f : 0.0f, 0.20);
     if (preview.image) {
         const float scale = min(imageRect.Width / preview.image->GetWidth(), imageRect.Height / preview.image->GetHeight());
         const float w = preview.image->GetWidth() * scale, h = preview.image->GetHeight() * scale;
         const auto saved = g.Save(); ui::ClipRound(g, imageRect, 10);
-        const float zoom = 1 + motion.hover * 0.012f - motion.press * 0.008f;
+        const float zoom = (0.92f + 0.08f * ui::SpringReveal(progress)) * (1 + motion.hover * 0.012f - motion.press * 0.008f - lifted * 0.025f);
         const float cx = imageRect.X + imageRect.Width / 2, cy = imageRect.Y + imageRect.Height / 2;
-        g.TranslateTransform(cx, cy); g.ScaleTransform(zoom, zoom); g.TranslateTransform(-cx, -cy);
+        g.TranslateTransform(cx, cy + 10 * (1 - ui::Entrance(hwnd))); g.ScaleTransform(zoom, zoom); g.TranslateTransform(-cx, -cy);
         preview.thumbnail.Draw(g, hwnd, *preview.image, RectF(imageRect.X + (imageRect.Width - w) / 2,
             imageRect.Y + (imageRect.Height - h) / 2, w, h));
         g.Restore(saved);
     }
+    if (lifted > 0) ui::Round(g, imageRect, 10, Color(static_cast<BYTE>(lifted * 100), 25, 29, 36));
     ui::Border(g, imageRect, 10, Color(static_cast<BYTE>(70 + motion.hover * 150),
         ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()));
-    ui::Text(g, L"单击编辑 · 拖动到聊天窗口或文件夹", {16, 231, 288, 24}, 12);
+    ui::Text(g, preview.dragging ? L"移动到目标位置，松开即可复制" : L"单击编辑 · 拖动到聊天窗口或文件夹", {16, 231, 288, 24}, 12);
     ui::Text(g, preview.file.filename().wstring(), {16, 259, 288, 22}, 10, ui::muted);
 }
 LRESULT CALLBACK PreviewProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -73,8 +85,10 @@ LRESULT CALLBACK PreviewProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
             if (dx >= GetSystemMetricsForDpi(SM_CXDRAG, GetDpiForWindow(hwnd)) ||
                 dy >= GetSystemMetricsForDpi(SM_CYDRAG, GetDpiForWindow(hwnd))) {
                 preview.pressing = false; ReleaseCapture(); preview.dragging = true;
+                InvalidateRect(hwnd, nullptr, FALSE); UpdateWindow(hwnd);
                 if (preview.drag) preview.drag();
                 preview.dragging = false; preview.lastTick = GetTickCount64();
+                InvalidateRect(hwnd, nullptr, FALSE);
             }
         }
         return 0;
@@ -109,8 +123,9 @@ bool InitPreview(HINSTANCE instance, function<void()> drag, function<void()> edi
     if (preview.window) ui::Corners(preview.window);
     return preview.window != nullptr;
 }
-void ShowPreview(Bitmap* image, const filesystem::path& file, POINT point, unsigned seconds) {
+void ShowPreview(Bitmap* image, const filesystem::path& file, POINT point, unsigned seconds, RECT origin) {
     if (!preview.window || !image) return;
+    CancelVisualEffects(); preview.dragStatus.clear();
     preview.thumbnail.Reset(); preview.image = image; preview.file = file; preview.pressing = false;
     preview.remaining = static_cast<ULONGLONG>(seconds) * 1000; preview.lastTick = GetTickCount64();
     KillTimer(preview.window, 1);
@@ -118,15 +133,31 @@ void ShowPreview(Bitmap* image, const filesystem::path& file, POINT point, unsig
     ui::Place(preview.window, 320, 294, true, point);
     ui::RestartMotion(preview.window);
     ShowWindow(preview.window, SW_SHOWNOACTIVATE); InvalidateRect(preview.window, nullptr, FALSE);
+    if (origin.right > origin.left && origin.bottom > origin.top) FlyToPreview(*image, origin, PreviewImageScreenRect());
+}
+RECT PreviewImageScreenRect() {
+    if (!preview.window || !preview.image) return {};
+    const float scale = min(imageRect.Width / preview.image->GetWidth(), imageRect.Height / preview.image->GetHeight());
+    const float w = preview.image->GetWidth() * scale, h = preview.image->GetHeight() * scale, dpi = ui::Scale(preview.window);
+    RECT window{}; GetWindowRect(preview.window, &window);
+    const LONG x = window.left + static_cast<LONG>(lround((imageRect.X + (imageRect.Width - w) / 2) * dpi)),
+        y = window.top + static_cast<LONG>(lround((imageRect.Y + (imageRect.Height - h) / 2) * dpi));
+    return {x, y, x + static_cast<LONG>(lround(w * dpi)), y + static_cast<LONG>(lround(h * dpi))};
+}
+void PreviewDragResult(bool accepted) {
+    preview.dragStatus = accepted ? L"已复制 · 原图保留" : L"已返回 · 原图保留";
+    if (preview.window) InvalidateRect(preview.window, nullptr, FALSE);
 }
 void HidePreview() {
     if (!preview.window) return;
+    CancelVisualEffects();
     KillTimer(preview.window, 1); preview.pressing = false;
     if (GetCapture() == preview.window) ReleaseCapture();
     ShowWindow(preview.window, SW_HIDE);
 }
 bool PreviewVisible() { return preview.window && IsWindowVisible(preview.window); }
 void DestroyPreview() {
+    CancelVisualEffects();
     if (preview.window) { KillTimer(preview.window, 1); DestroyWindow(preview.window); preview.window = nullptr; }
     preview.thumbnail.Reset(); preview.image = nullptr; preview.drag = {}; preview.edit = {};
 }

@@ -74,6 +74,8 @@ struct FileData final : IDataObject {
 };
 struct DropSource final : IDropSource {
     LONG refs = 1;
+    function<void(DWORD)> feedback;
+    explicit DropSource(function<void(DWORD)> update) : feedback(move(update)) {}
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void** out) override {
         if (!out) return E_POINTER;
         *out = nullptr;
@@ -90,7 +92,10 @@ struct DropSource final : IDropSource {
         if (escape) return DRAGDROP_S_CANCEL;
         return keys & MK_LBUTTON ? S_OK : DRAGDROP_S_DROP;
     }
-    HRESULT STDMETHODCALLTYPE GiveFeedback(DWORD) override { return DRAGDROP_S_USEDEFAULTCURSORS; }
+    HRESULT STDMETHODCALLTYPE GiveFeedback(DWORD effect) override {
+        if (feedback) feedback(effect);
+        return DRAGDROP_S_USEDEFAULTCURSORS;
+    }
 };
 }
 HRESULT CreateFileDataObject(const filesystem::path& file, IDataObject** result) {
@@ -101,14 +106,14 @@ HRESULT CreateFileDataObject(const filesystem::path& file, IDataObject** result)
     if (!data) return E_OUTOFMEMORY;
     *result = data; return S_OK;
 }
-HRESULT DragFile(const filesystem::path& file, DWORD& effect) {
+HRESULT DragFile(const filesystem::path& file, DWORD& effect, function<void(DWORD)> feedback) {
     effect = DROPEFFECT_NONE;
     error_code ec;
     if (!filesystem::is_regular_file(file, ec)) return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
     IDataObject* data = nullptr;
     const HRESULT created = CreateFileDataObject(file, &data);
     if (FAILED(created)) return created;
-    auto* source = new (nothrow) DropSource;
+    auto* source = new (nothrow) DropSource(move(feedback));
     if (!source) { data->Release(); return E_OUTOFMEMORY; }
     const HRESULT result = DoDragDrop(data, source, DROPEFFECT_COPY, &effect);
     source->Release(); data->Release(); return result;

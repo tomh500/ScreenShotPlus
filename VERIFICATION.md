@@ -1,5 +1,16 @@
 # 验证记录
 
+## 用户正在运行的 Release EXE 核查（2026-10-09）
+
+- 实际用户进程 PID 38840，路径为 `C:\Users\jingy\source\repos\ScreenShotPlus\x64\Release\ScreenShotPlus.exe`，父进程为 Explorer（PID 6556），同处会话 1。该文件版本为 1.1.3。
+- 读取该实际进程的 TokenIntegrityLevel 得到 RID 4096（Low），读取 Explorer 得到 RID 8192（Medium）。这次检查的是用户已运行的程序，而非测试子进程或仅由文件标签推断。
+- 实际主面板 HWND 7083356 可见，`ScreenShotPlus.TrayRegistered` 属性为 false，Shell_NotifyIconGetRect 返回 0x80004005、矩形全为零，确认应用没有成功注册图标。未将图标不可见解释为隐藏图标区设置。
+- 同机 Medium 独立探针仍可成功注册并取得图标矩形，再立即删除自己的图标。用户程序与 Explorer 的实际完整性差异、EXE 的继承 Low 标签仍是本次确定的权限限制；没有确认其他代码层面的故障。
+- 新增只读 `tools\inspect-runtime.ps1`，已针对上述真实进程运行验证。未修改用户配置、文件安全标签或 Explorer 状态。
+- 首次重构建因用户实例占用 EXE 而报 LNK1104。随后经用户明确许可，通过 WM_QUIT 正常退出 PID 38840，Release x64 重构建通过；本次未改应用代码、不重新打包。
+- 对刚重构建的同一路径 EXE 启动自己的验证实例 PID 71108：实际完整性仍为 RID 4096，托盘注册标记 false，GetRect 为 0x80004005。验证实例也通过 WM_QUIT 正常退出，没有留下后台测试进程。
+- 问题尚未修复：当前输出路径仍以 Low 权限运行；需要正常完整性的运行文件和进程后，才能继续验收应用托盘、自启动以及跨程序拖放。编译或重复启动不能代替此验收。
+
 ## 直接构建交付与解压目录核查（v1.1.3，2026-10-09）
 
 - 用户指定的解压目录为 `C:\Users\jingy\source\repos\ScreenShotPlus\dist\ScreenShotPlus-x64`，仍处于开发仓库内。`icacls` 实查该目录以及其中的 EXE 均继承 Low Mandatory Level，确认本次解压未改变权限限制。

@@ -56,6 +56,8 @@ v1.1.1 增强了命名互斥锁：同一登录会话内的不同目录、不同�
 
 托盘诊断：`tools\tray-probe.ps1` 在当前 PowerShell 进程中注册并立即移除自己的诊断图标，打印进程/Explorer 完整性及真实图标矩形。测试 EXE 的 `--tray-probe` 则使用原生 C++ 进程打印自身完整性、结构大小、窗口/图标参数及注册结果。两者用于定位文件标签导致的不同权限；单独的探针成功不代表应用托盘已经通过验收。
 
+实际运行状态核查：执行 `.\tools\inspect-runtime.ps1`，默认检查 `x64\Release\ScreenShotPlus.exe`，列出所有正在运行的 ScreenShotPlus 的完整路径、父进程、会话和实际进程完整性，以及主面板的托盘注册标记和 Shell 图标矩形。可通过 `-ExecutablePath` 指定另一份 EXE。该脚本只读取状态，不启动/关闭应用、不注册图标，也不修改任何安全标签；它能区分“文件带 Low 标签”和“当前运行的进程确实是 Low”。
+
 交付以 `x64\Release\ScreenShotPlus.exe` 为准，由用户直接发布；日常工作不打包、不更新 dist。构建脚本会输出本次 EXE 的完整路径与版本。只有用户明确要求打包时才使用 `-Package`；EXE 运行仅依赖 Windows 系统 DLL。
 
 ## 验证范围

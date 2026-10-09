@@ -26,6 +26,8 @@ void Button(Gdiplus::Graphics& g, Gdiplus::RectF rect, const std::wstring& text,
     bool primary = false, bool hovered = false);
 void Prepare(Gdiplus::Graphics& g, HWND hwnd);
 void Place(HWND hwnd, int width, int height, bool corner = false, POINT point = {});
+// 按逻辑尺寸定位窗口，自动适应显示器工作区与 DPI，并夹取到可见范围内。
+void PlaceAt(HWND hwnd, int x, int y, int width, int height, POINT anchor);
 void DpiChanged(HWND hwnd, LPARAM rect, int width, int height);
 void Corners(HWND hwnd);
 std::filesystem::path KnownFolder(REFKNOWNFOLDERID id);

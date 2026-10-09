@@ -10,7 +10,7 @@ struct Preview {
     POINT mouse{-1, -1}, pressed{};
     bool pressing = false, dragging = false;
     ULONGLONG remaining = 0, lastTick = 0;
-    function<void()> drag;
+    function<void()> drag, edit;
 } preview;
 const RectF closeButton{278, 12, 28, 28}, imageRect{16, 52, 288, 166};
 void DrawPreview(HWND hwnd) {
@@ -25,7 +25,7 @@ void DrawPreview(HWND hwnd) {
         g.DrawImage(preview.image, RectF(imageRect.X + (imageRect.Width - w) / 2,
             imageRect.Y + (imageRect.Height - h) / 2, w, h));
     }
-    ui::Text(g, L"拖动图片到聊天窗口或文件夹", {16, 231, 288, 24}, 13);
+    ui::Text(g, L"拖动分享 · 单击图片标注", {16, 231, 288, 24}, 13);
     ui::Text(g, preview.file.filename().wstring(), {16, 259, 288, 22}, 10, ui::muted);
 }
 LRESULT CALLBACK PreviewProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -42,7 +42,14 @@ LRESULT CALLBACK PreviewProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
         }
         return 0;
     }
-    case WM_LBUTTONUP: preview.pressing = false; if (GetCapture() == hwnd) ReleaseCapture(); return 0;
+    case WM_LBUTTONUP: {
+        const bool clicking = preview.pressing;
+        preview.pressing = false;
+        if (GetCapture() == hwnd) ReleaseCapture();
+        // 单击图片打开标注编辑；拖动由 WM_MOUSEMOVE 越过阈值后处理，两者不会互相触发。
+        if (clicking && !preview.dragging && preview.edit) preview.edit();
+        return 0;
+    }
     case WM_CAPTURECHANGED: preview.pressing = false; return 0;
     case WM_MOUSEMOVE: {
         preview.mouse = ui::Mouse(hwnd, lparam);
@@ -77,7 +84,7 @@ LRESULT CALLBACK PreviewProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
     return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 }
-bool InitPreview(HINSTANCE instance, function<void()> drag) {
+bool InitPreview(HINSTANCE instance, function<void()> drag, function<void()> edit) {
     WNDCLASSEXW cls{sizeof(cls)};
     cls.hInstance = instance; cls.lpfnWndProc = PreviewProc; cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     cls.lpszClassName = L"ScreenShotPlus.Preview";
@@ -86,6 +93,7 @@ bool InitPreview(HINSTANCE instance, function<void()> drag) {
     preview.window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
         cls.lpszClassName, L"ScreenShotPlus 最新截图", WS_POPUP, 0, 0, 320, 294, nullptr, nullptr, instance, nullptr);
     preview.drag = move(drag);
+    preview.edit = move(edit);
     if (preview.window) ui::Corners(preview.window);
     return preview.window != nullptr;
 }
@@ -107,5 +115,5 @@ void HidePreview() {
 bool PreviewVisible() { return preview.window && IsWindowVisible(preview.window); }
 void DestroyPreview() {
     if (preview.window) { KillTimer(preview.window, 1); DestroyWindow(preview.window); preview.window = nullptr; }
-    preview.image = nullptr; preview.drag = {};
+    preview.image = nullptr; preview.drag = {}; preview.edit = {};
 }

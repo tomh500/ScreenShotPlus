@@ -8,6 +8,7 @@
 #include "settings.h"
 #include "dragdrop.h"
 #include "hotkeys.h"
+#include "editor.h"
 using namespace std;
 using namespace Gdiplus;
 namespace {
@@ -23,6 +24,7 @@ struct App {
     filesystem::path configFile;
     Hotkeys hotkeys;
     bool exiting = false;
+    bool startup = false;
     UINT taskbarCreated = 0;
     unique_ptr<Bitmap> latest, pending;
     filesystem::path latestFile;
@@ -36,7 +38,7 @@ const RectF retryButton{24, 460, 372, 44};
 void ShowPanel() {
     if (app.exiting || app.phase != App::Idle) return;
     if (SettingsVisible()) { ShowSettings(app.config); return; }
-    ui::Place(app.panel, 420, 570); ShowWindow(app.panel, SW_SHOW);
+    ui::Place(app.panel, PANEL_WIDTH, PANEL_HEIGHT); ShowWindow(app.panel, SW_SHOW);
     SetForegroundWindow(app.panel); InvalidateRect(app.panel, nullptr, FALSE);
 }
 void Notice(const wstring& text) { app.notice = text; ShowPanel(); }
@@ -57,7 +59,7 @@ void SavePending() {
     ShowWindow(app.panel, SW_HIDE); LatestPreview();
 }
 void StartCapture() {
-    if (app.phase != App::Idle || SettingsVisible() || app.exiting) return;
+    if (app.phase != App::Idle || SettingsVisible() || editor::EditorVisible() || app.exiting) return;
     app.restorePreview = PreviewVisible();
     ShowWindow(app.panel, SW_HIDE); HidePreview(); DwmFlush();
     app.phase = App::Selecting;
@@ -78,7 +80,7 @@ void StartCapture() {
     }
 }
 void DragLatest() {
-    if (app.phase != App::Idle || !app.latest || SettingsVisible()) return;
+    if (app.phase != App::Idle || !app.latest || SettingsVisible() || editor::EditorVisible()) return;
     app.phase = App::Dragging;
     DWORD effect = DROPEFFECT_NONE;
     const HRESULT result = DragFile(app.latestFile, effect);
@@ -88,6 +90,32 @@ void DragLatest() {
         app.notice = result == DRAGDROP_S_DROP && effect == DROPEFFECT_COPY ? L"文件已拖出，原截图仍保留。" : L"拖放已取消，原截图仍保留。";
         InvalidateRect(app.panel, nullptr, FALSE);
     }
+}
+void EditLatest() {
+    if (app.phase != App::Idle || !app.latest || SettingsVisible() || editor::EditorVisible()) return;
+    HidePreview();
+    // 编辑器持有自己的副本，编辑期间的绘制不会影响这张已经保存的截图。
+    editor::OpenEditor(*app.latest, app.latestFile);
+    if (!editor::EditorVisible()) {
+        app.notice = L"无法打开标注编辑器，请重试。";
+        LatestPreview();
+        return;
+    }
+    app.notice = L"标注完成后点击保存，编辑结果会写回原截图文件。";
+    InvalidateRect(app.panel, nullptr, FALSE);
+}
+void EditedImage(unique_ptr<Bitmap> image) {
+    app.phase = App::Idle;
+    if (!image) {
+        // 取消：原截图与预览都保持不变。
+        app.notice = L"已取消标注，原截图保持不变。";
+        if (app.latest) LatestPreview();
+        return;
+    }
+    app.latest = move(image);
+    app.notice = L"标注已写回原截图文件，可直接拖动分享。";
+    ShowWindow(app.panel, SW_HIDE);
+    LatestPreview();
 }
 bool ApplyConfig(const Config& next, wstring& error) {
     if (!ApplyConfiguredSettings(app.panel, app.hotkeys, app.config, next, app.configFile, error)) return false;
@@ -170,20 +198,22 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
     }
     case WM_KEYDOWN: if (wparam == VK_ESCAPE) ShowWindow(hwnd, SW_HIDE); return 0;
     case WM_DPICHANGED: {
-        ui::DpiChanged(hwnd, lparam, 420, 570);
+        ui::DpiChanged(hwnd, lparam, PANEL_WIDTH, PANEL_HEIGHT);
         return 0;
     }
     case WM_DESTROY:
         app.exiting = true; CancelSelection();
         Shell_NotifyIconW(NIM_DELETE, &app.tray);
         ReleaseHotkeys(hwnd, app.hotkeys);
-        DestroySettings(); DestroyPreview(); app.latest.reset(); app.pending.reset(); PostQuitMessage(0); return 0;
+        DestroySettings(); DestroyPreview(); editor::DestroyEditor();
+        app.latest.reset(); app.pending.reset(); PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(hwnd, message, wparam, lparam);
 }
 }
-int RunApp(HINSTANCE instance, const filesystem::path& configFile) {
+int RunApp(HINSTANCE instance, bool startup, const filesystem::path& configFile) {
     app.instance = instance;
+    app.startup = startup;
     app.configFile = configFile.empty() ? ConfigFile() : configFile;
     wstring warning; app.config = LoadConfig(app.configFile, warning);
     if (!warning.empty()) app.notice = warning;
@@ -195,7 +225,11 @@ int RunApp(HINSTANCE instance, const filesystem::path& configFile) {
     app.panel = CreateWindowExW(WS_EX_TOOLWINDOW, PANEL_CLASS, L"ScreenShotPlus", WS_POPUP,
         0, 0, 420, 520, nullptr, nullptr, instance, nullptr);
     if (!app.panel) return 5;
-    if (!InitPreview(instance, DragLatest) || !InitSettings(instance, app.panel, ApplyConfig)) {
+    if (!InitPreview(instance, DragLatest, EditLatest) ||
+        !InitSettings(instance, app.panel, ApplyConfig) ||
+        !editor::InitEditor(instance, app.panel, [](Bitmap* image, const filesystem::path&) {
+            EditedImage(unique_ptr<Bitmap>(image));
+        })) {
         DestroyWindow(app.panel); return 7;
     }
     ui::Corners(app.panel);
@@ -205,7 +239,9 @@ int RunApp(HINSTANCE instance, const filesystem::path& configFile) {
     wcscpy_s(app.tray.szTip, L"ScreenShotPlus · 区域截图与拖动分享"); AddTray();
     const auto hotkeyWarning = RegisterConfiguredHotkeys(app.panel, app.hotkeys, app.config);
     if (!hotkeyWarning.empty()) app.notice += L" " + hotkeyWarning;
-    ShowPanel();
+    // 开机自启动时静默驻留托盘，不弹出面板；此时托盘气泡仍说明程序已就绪。
+    if (app.startup) app.notice = L"已随开机启动，正在托盘待命。点击托盘图标可打开面板。";
+    else ShowPanel();
     MSG message{}; BOOL result;
     while ((result = GetMessageW(&message, nullptr, 0, 0)) > 0) { TranslateMessage(&message); DispatchMessageW(&message); }
     if (IsWindow(app.panel)) DestroyWindow(app.panel);

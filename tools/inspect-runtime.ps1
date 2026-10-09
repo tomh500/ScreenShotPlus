@@ -58,7 +58,10 @@ if (!$taskApps.Count) { Write-Output 'No running ScreenShotPlus instance; runtim
             $taskRect = [SspRuntime+Rect]::new()
             $taskResult = [SspRuntime]::Shell_NotifyIconGetRect([ref]$taskId, [ref]$taskRect)
             $taskRegistered = [SspRuntime]::GetPropW($taskWindow, 'ScreenShotPlus.TrayRegistered') -ne [IntPtr]::Zero
-            Write-Host "Panel PID=$taskWindowPid HWND=$taskWindow Visible=$([SspRuntime]::IsWindowVisible($taskWindow)) Registered=$taskRegistered GetRect=0x$([Convert]::ToString($taskResult,16)) Rect=$($taskRect.left),$($taskRect.top),$($taskRect.right),$($taskRect.bottom)"
+            Write-Host "Panel PID=$taskWindowPid HWND=$taskWindow Visible=$([SspRuntime]::IsWindowVisible($taskWindow)) RegisteredMarker=$taskRegistered GetRect=0x$([Convert]::ToString($taskResult,16)) Rect=$($taskRect.left),$($taskRect.top),$($taskRect.right),$($taskRect.bottom)"
+            if (!$taskRegistered -and $taskResult -eq 0) {
+                Write-Host 'Shell confirms registration; the application marker is absent (legacy versions do not publish it).'
+            }
         }
     }
     return $true

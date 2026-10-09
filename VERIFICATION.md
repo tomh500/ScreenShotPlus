@@ -1,5 +1,13 @@
 # 验证记录
 
+## GitHub 备份与普通目录旧版实测（2026-10-09）
+
+- 按用户指定目标上传至 `tomh500/ScreenShotPlus`；保留远程初始 MIT 许可证提交并与本地项目历史合并，没有强制覆盖远程历史。上传前工作区干净，受跟踪文件未包含构建产物、个人配置或常见密钥格式匹配。
+- 检测到用户自行运行的 `C:\Users\jingy\Downloads\ScreenShotPlus.exe`，文件版本为 1.0.0，PID 33564，父进程为 Explorer。该文件没有显式 Low 标签，实际进程完整性 RID 为 8192（Medium）。
+- 实际 Shell_NotifyIconGetRect 返回 S_OK，图标矩形为 (2251,1380)-(2291,1440)。这是旧版实际应用的正向托盘注册证据，不是独立探针。
+- 旧版没有 `ScreenShotPlus.TrayRegistered` 属性，诊断脚本现在明确将其称为 RegisteredMarker，并在 Shell 成功而标记缺失时说明兼容性，避免误报旧版未注册。
+- 未关闭该用户实例、未调整任何完整性标签，也未删除原仓库。最新版在用户正常发布环境中的托盘、实际自启动和客户端拖放仍待验收。
+
 ## 用户正在运行的 Release EXE 核查（2026-10-09）
 
 - 实际用户进程 PID 38840，路径为 `C:\Users\jingy\source\repos\ScreenShotPlus\x64\Release\ScreenShotPlus.exe`，父进程为 Explorer（PID 6556），同处会话 1。该文件版本为 1.1.3。

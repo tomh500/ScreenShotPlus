@@ -1,5 +1,12 @@
 # 验证记录
 
+## 直接构建交付与解压目录核查（v1.1.3，2026-10-09）
+
+- 用户指定的解压目录为 `C:\Users\jingy\source\repos\ScreenShotPlus\dist\ScreenShotPlus-x64`，仍处于开发仓库内。`icacls` 实查该目录以及其中的 EXE 均继承 Low Mandatory Level，确认本次解压未改变权限限制。
+- 核查时没有正在运行的 ScreenShotPlus 进程；未将该解压 EXE 的实际进程状态或图标显示标为通过。
+- 交付规范改为只构建 `x64\Release\ScreenShotPlus.exe`，由用户发布，不再自动生成便携包。界面移除依赖 ZIP 的建议，改为提示核查 EXE 与目录的完整性标签。
+- Release x64、Debug x64 编译通过。直接构建输出仍继承仓库的 Low 标签；编译通过与当前路径可以正常注册托盘是不同的验收项目。未修改文件或目录的安全标签。
+
 ## 托盘失败根因核查（v1.1.2，2026-10-09）
 
 - `icacls` 实查仓库根目录、Release 输出、测试 EXE 和 dist 发布 EXE 均存在 Low Mandatory Level 标签；EXE 标签为从父目录继承。

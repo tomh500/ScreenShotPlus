@@ -13,6 +13,9 @@ Push-Location $taskRoot
 try {
     & $taskMsbuild ScreenShotPlus.sln /m /t:Build "/p:Configuration=$Configuration" /p:Platform=x64 /nologo /verbosity:minimal
     if ($LASTEXITCODE -ne 0) { throw '应用构建失败。' }
+    $taskOutput = Join-Path $taskRoot "x64\$Configuration\ScreenShotPlus.exe"
+    Write-Output "构建输出：$taskOutput"
+    Write-Output "文件版本：$((Get-Item -LiteralPath $taskOutput).VersionInfo.FileVersion)"
     if ($Test) {
         & $taskMsbuild tests\ScreenShotPlus.Tests.vcxproj /m /t:Build "/p:Configuration=$Configuration" /p:Platform=x64 /nologo /verbosity:minimal
         if ($LASTEXITCODE -ne 0) { throw '测试构建失败。' }

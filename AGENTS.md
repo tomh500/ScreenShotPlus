@@ -11,6 +11,7 @@
 ## 构建和验证
 
 - 主交付目标：Windows 10/11 x64，便携 EXE。
+- 日常交付仅构建，以 `x64\Release\ScreenShotPlus.exe` 为准，由用户自行发布；不自动打包或更新 dist。只有用户明确要求打包时才生成 ZIP。
 - 保留现有 .sln / .vcxproj，使用 /std:c++latest、/utf-8 和一致性检查。
 - 每阶段必须通过 Release x64；首版交付补充 Debug x64 构建。
 - QQ、微信、浏览器附件和多屏拖放必须区分实测结果与未验证项目，不得以模拟测试冒充客户端验收。

@@ -18,7 +18,7 @@ const RectF closeButton{452, 16, 28, 28}, folderButton{24, 180, 452, 44},
     saveButton{24, 746, 218, 44}, cancelButton{254, 746, 222, 44};
 void DrawSettings(HWND hwnd, HDC target = nullptr) {
     ui::Paint paint(hwnd, target); Graphics g(paint.buffer); ui::Prepare(g, hwnd);
-    ui::Text(g, L"设置 · v1.1.2", {24, 25, 390, 40}, 25, ui::foreground, true);
+    ui::Text(g, L"设置 · v1.1.3", {24, 25, 390, 40}, 25, ui::foreground, true);
     ui::Button(g, closeButton, L"×", false, ui::Inside(settings.mouse, closeButton));
     ui::Text(g, L"保存目录", {24, 90, 452, 26}, 14, ui::muted);
     ui::Round(g, {24, 122, 452, 46}, 10, ui::surface);

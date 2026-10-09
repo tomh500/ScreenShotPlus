@@ -4,6 +4,7 @@ struct Config {
     std::filesystem::path folder;
     UINT modifiers = MOD_CONTROL | MOD_SHIFT, key = 'S';
     bool printScreen = false;
+    bool startup = false;
     unsigned previewSeconds = 0;
 };
 Config DefaultConfig();

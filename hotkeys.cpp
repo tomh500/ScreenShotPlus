@@ -11,7 +11,7 @@ wstring RegisterConfiguredHotkeys(HWND window, Hotkeys& state, const Config& con
     return warning;
 }
 bool ApplyConfiguredSettings(HWND window, Hotkeys& state, Config& current, const Config& next,
-    const filesystem::path& file, wstring& error) {
+    const filesystem::path& file, wstring& error, const wchar_t* startupKey) {
     if (!ValidConfig(next)) { error = L"设置无效，请重新选择目录或快捷键。"; return false; }
     const bool newPrimary = !state.primaryRegistered || next.key != current.key || next.modifiers != current.modifiers;
     const bool newPrint = next.printScreen && !state.printRegistered;
@@ -23,7 +23,16 @@ bool ApplyConfiguredSettings(HWND window, Hotkeys& state, Config& current, const
         if (newPrimary) UnregisterHotKey(window, candidateId);
         error = L"PrintScreen 无法注册，原设置保持有效。"; return false;
     }
-    if (!SaveConfig(file, next, error)) {
+    StartupEntry previous;
+    const bool changeStartup = next.startup || next.startup != current.startup;
+    const bool startupRead = !changeStartup || ReadStartupEntry(startupKey, previous, error);
+    const bool startupSet = startupRead && (!changeStartup || SetStartup(startupKey, next.startup, error));
+    const bool saved = startupSet && SaveConfig(file, next, error);
+    if (!saved) {
+        if (startupSet && changeStartup) {
+            wstring rollback;
+            if (!WriteStartupEntry(startupKey, previous, rollback)) error += L" 开机启动回退失败：" + rollback;
+        }
         if (newPrimary) UnregisterHotKey(window, candidateId);
         if (newPrint) UnregisterHotKey(window, 2);
         return false;

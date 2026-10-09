@@ -21,6 +21,7 @@ struct App {
     bool mouseDown = false;
     Config config;
     filesystem::path configFile;
+    wstring startupKey;
     Hotkeys hotkeys;
     bool exiting = false;
     UINT taskbarCreated = 0;
@@ -90,7 +91,7 @@ void DragLatest() {
     }
 }
 bool ApplyConfig(const Config& next, wstring& error) {
-    if (!ApplyConfiguredSettings(app.panel, app.hotkeys, app.config, next, app.configFile, error)) return false;
+    if (!ApplyConfiguredSettings(app.panel, app.hotkeys, app.config, next, app.configFile, error, app.startupKey.c_str())) return false;
     if (PreviewVisible()) LatestPreview();
     return true;
 }
@@ -182,8 +183,9 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
     return DefWindowProcW(hwnd, message, wparam, lparam);
 }
 }
-int RunApp(HINSTANCE instance, const filesystem::path& configFile) {
+int RunApp(HINSTANCE instance, const filesystem::path& configFile, bool trayStartup, const wchar_t* startupKey) {
     app.instance = instance;
+    app.startupKey = startupKey;
     app.configFile = configFile.empty() ? ConfigFile() : configFile;
     wstring warning; app.config = LoadConfig(app.configFile, warning);
     if (!warning.empty()) app.notice = warning;
@@ -205,7 +207,7 @@ int RunApp(HINSTANCE instance, const filesystem::path& configFile) {
     wcscpy_s(app.tray.szTip, L"ScreenShotPlus · 区域截图与拖动分享"); AddTray();
     const auto hotkeyWarning = RegisterConfiguredHotkeys(app.panel, app.hotkeys, app.config);
     if (!hotkeyWarning.empty()) app.notice += L" " + hotkeyWarning;
-    ShowPanel();
+    if (!trayStartup) ShowPanel();
     MSG message{}; BOOL result;
     while ((result = GetMessageW(&message, nullptr, 0, 0)) > 0) { TranslateMessage(&message); DispatchMessageW(&message); }
     if (IsWindow(app.panel)) DestroyWindow(app.panel);

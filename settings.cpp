@@ -13,7 +13,8 @@ struct Settings {
 } settings;
 const RectF closeButton{452, 16, 28, 28}, folderButton{24, 180, 452, 44},
     hotkeyButton{24, 272, 452, 44}, printButton{24, 336, 452, 44},
-    secondsButton{24, 450, 452, 44}, saveButton{24, 590, 218, 44}, cancelButton{254, 590, 222, 44};
+    secondsButton{24, 450, 452, 44}, startupButton{24, 542, 452, 44},
+    saveButton{24, 652, 218, 44}, cancelButton{254, 652, 222, 44};
 void DrawSettings(HWND hwnd) {
     ui::Paint paint(hwnd); Graphics g(paint.buffer); ui::Prepare(g, hwnd);
     ui::Text(g, L"设置", {24, 25, 390, 40}, 25, ui::foreground, true);
@@ -32,7 +33,10 @@ void DrawSettings(HWND hwnd) {
     ui::Button(g, secondsButton, seconds ? L"缩略图：" + to_wstring(seconds) + L" 秒后收起   点击切换" :
         L"缩略图：保留至关闭或下一次截图   点击切换", false, ui::Inside(settings.mouse, secondsButton));
     ui::Text(g, L"悬停和拖拽期间暂停倒计时。截图文件始终保留。", {24, 506, 452, 24}, 12, ui::muted);
-    ui::Text(g, settings.notice, {24, 542, 452, 42}, 12, ui::danger);
+    ui::Button(g, startupButton, settings.working.startup ? L"☑ 开机自启动（直接进入托盘）" : L"☐ 开机自启动（直接进入托盘）",
+        settings.working.startup, ui::Inside(settings.mouse, startupButton));
+    ui::Text(g, L"仅对当前用户生效；移动 EXE 后请重新保存设置。", {24, 595, 452, 24}, 12, ui::muted);
+    ui::Text(g, settings.notice, {24, 620, 452, 30}, 12, ui::danger);
     ui::Button(g, saveButton, L"保存设置", true, ui::Inside(settings.mouse, saveButton));
     ui::Button(g, cancelButton, L"取消", false, ui::Inside(settings.mouse, cancelButton));
 }
@@ -77,6 +81,8 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
             constexpr array<unsigned, 7> choices{0, 5, 10, 15, 30, 60, 120};
             const auto it = find(choices.begin(), choices.end(), settings.working.previewSeconds);
             settings.working.previewSeconds = it == choices.end() || next(it) == choices.end() ? choices[0] : *next(it);
+        } else if (hit(startupButton)) {
+            settings.listening = false; settings.working.startup = !settings.working.startup;
         } else if (hit(saveButton)) {
             settings.listening = false;
             if (settings.apply && settings.apply(settings.working, settings.notice)) {
@@ -105,7 +111,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
         }
         return 0;
     case WM_DPICHANGED: {
-        ui::DpiChanged(hwnd, lparam, 500, 658); return 0;
+        ui::DpiChanged(hwnd, lparam, 500, 720); return 0;
     }
     }
     return DefWindowProcW(hwnd, msg, wparam, lparam);
@@ -118,14 +124,14 @@ bool InitSettings(HINSTANCE instance, HWND owner, function<bool(const Config&, w
     if (!GetClassInfoExW(instance, cls.lpszClassName, &existing) && !RegisterClassExW(&cls)) return false;
     settings.owner = owner; settings.apply = move(apply);
     settings.window = CreateWindowExW(WS_EX_TOOLWINDOW, cls.lpszClassName, L"ScreenShotPlus 设置", WS_POPUP,
-        0, 0, 500, 658, owner, nullptr, instance, nullptr);
+        0, 0, 500, 720, owner, nullptr, instance, nullptr);
     if (settings.window) ui::Corners(settings.window);
     return settings.window != nullptr;
 }
 void ShowSettings(const Config& config) {
     if (!settings.window) return;
     if (!SettingsVisible()) { settings.working = config; settings.listening = false; settings.notice.clear(); }
-    ui::Place(settings.window, 500, 658); ShowWindow(settings.window, SW_SHOW);
+    ui::Place(settings.window, 500, 720); ShowWindow(settings.window, SW_SHOW);
     SetForegroundWindow(settings.window); SetFocus(settings.window); InvalidateRect(settings.window, nullptr, FALSE);
 }
 void HideSettings() { if (settings.window) { settings.listening = false; ShowWindow(settings.window, SW_HIDE); } }

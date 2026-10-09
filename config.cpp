@@ -41,6 +41,7 @@ Config LoadConfig(const filesystem::path& file, wstring& warning) {
         parsed.modifiers = static_cast<UINT>(modifiers); parsed.key = static_cast<UINT>(key);
         parsed.previewSeconds = static_cast<unsigned>(seconds);
         parsed.printScreen = data.at("printScreen").get<bool>();
+        parsed.startup = data.value("startup", false);
         if (!ValidConfig(parsed)) throw runtime_error("invalid config");
         result = move(parsed);
     } catch (const exception&) { warning = L"配置损坏或无效，已使用默认设置；原文件保留到下次保存设置。"; }
@@ -55,7 +56,7 @@ bool SaveConfig(const filesystem::path& file, const Config& c, wstring& error) {
         const auto path = c.folder.u8string();
         const json data{{"folder", string(reinterpret_cast<const char*>(path.data()), path.size())},
             {"modifiers", c.modifiers}, {"key", c.key}, {"printScreen", c.printScreen},
-            {"previewSeconds", c.previewSeconds}};
+            {"previewSeconds", c.previewSeconds}, {"startup", c.startup}};
         ofstream output(temporary, ios::binary | ios::trunc);
         output << data.dump(2) << '\n'; output.close();
         if (!output) throw runtime_error("config write failed");

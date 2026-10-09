@@ -17,6 +17,10 @@
 using namespace std;
 using namespace Gdiplus;
 namespace {
+struct TestStartupKey {
+    wstring key = L"Software\\ScreenShotPlus.Tests-" + to_wstring(GetCurrentProcessId()) + L"-" + to_wstring(GetTickCount64());
+    ~TestStartupKey() { RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str()); }
+};
 void Check(bool condition, const char* message) { if (!condition) throw runtime_error(message); }
 void Pump(unsigned milliseconds) {
     const auto end = GetTickCount64() + milliseconds;
@@ -64,16 +68,19 @@ void Geometry() {
 void Configuration(const filesystem::path& root) {
     const auto file = root / L"设置" / L"config.json";
     Config c = DefaultConfig(); c.folder = root / L"截图 中文 空格";
-    c.modifiers = MOD_CONTROL | MOD_ALT; c.key = VK_F9; c.printScreen = true; c.previewSeconds = 15;
+    c.modifiers = MOD_CONTROL | MOD_ALT; c.key = VK_F9; c.printScreen = true; c.previewSeconds = 15; c.startup = true;
     wstring error;
     Check(SaveConfig(file, c, error), "save config");
     wstring warning;
     auto loaded = LoadConfig(file, warning);
-    Check(warning.empty() && loaded.folder == c.folder && loaded.key == VK_F9 && loaded.previewSeconds == 15 && loaded.printScreen, "Unicode config round trip");
+    Check(warning.empty() && loaded.folder == c.folder && loaded.key == VK_F9 && loaded.previewSeconds == 15 && loaded.printScreen && loaded.startup, "Unicode config round trip");
     c.previewSeconds = 0; Check(SaveConfig(file, c, error), "replace existing config atomically");
     Check(LoadConfig(file, warning).previewSeconds == 0, "updated config persisted");
     nlohmann::json data;
     { ifstream in(file); in >> data; }
+    auto legacy = data; legacy.erase("startup");
+    { ofstream out(file); out << legacy; }
+    Check(!LoadConfig(file, warning).startup && warning.empty(), "legacy config defaults startup off");
     for (const auto& bad : {nlohmann::json(-1), nlohmann::json(4000), nlohmann::json(2.5), nlohmann::json("bad")}) {
         auto invalid = data; invalid["previewSeconds"] = bad;
         { ofstream out(file); out << invalid; }
@@ -254,6 +261,7 @@ bool ProbeHotkey(UINT modifiers, UINT key) {
     }).get();
 }
 void HotkeyTransactions(HINSTANCE instance, const filesystem::path& root) {
+    TestStartupKey startup;
     WNDCLASSEXW cls{sizeof(cls)}, existing{sizeof(existing)};
     cls.lpfnWndProc = PatternProc; cls.hInstance = instance; cls.lpszClassName = L"ScreenShotPlus.TestPattern";
     if (!GetClassInfoExW(instance, cls.lpszClassName, &existing)) Check(RegisterClassExW(&cls) != 0, "hotkey test class");
@@ -264,7 +272,7 @@ void HotkeyTransactions(HINSTANCE instance, const filesystem::path& root) {
     current.modifiers = MOD_CONTROL | MOD_ALT | MOD_SHIFT; current.key = VK_F24;
     Hotkeys state; wstring error, warning;
     const auto file = root / L"hotkeys" / L"config.json";
-    Check(ApplyConfiguredSettings(window, state, current, current, file, error), "initial hotkey setup");
+    Check(ApplyConfiguredSettings(window, state, current, current, file, error, startup.key.c_str()), "initial hotkey setup");
     Check(!ProbeHotkey(current.modifiers, current.key), "active primary key is reserved");
     Config next = current; next.key = VK_F23;
     promise<bool> ready; auto registered = ready.get_future();
@@ -275,23 +283,45 @@ void HotkeyTransactions(HINSTANCE instance, const filesystem::path& root) {
         if (ok) UnregisterHotKey(nullptr, 99);
     });
     Check(registered.get(), "conflicting key registered on another thread");
-    Check(!ApplyConfiguredSettings(window, state, current, next, file, error) && current.key == VK_F24,
+    Check(!ApplyConfiguredSettings(window, state, current, next, file, error, startup.key.c_str()) && current.key == VK_F24,
         "hotkey conflict preserves current setting");
     Check(LoadConfig(file, warning).key == VK_F24 && !ProbeHotkey(current.modifiers, current.key),
         "conflict preserves persisted config and old registration");
     blocker.request_stop(); blocker.join();
-    Check(ApplyConfiguredSettings(window, state, current, next, file, error) && current.key == VK_F23,
+    next.startup = true;
+    const bool startupAvailable = ApplyConfiguredSettings(window, state, current, next, file, error, startup.key.c_str());
+    if (!startupAvailable) {
+        Check(current.key == VK_F24 && !current.startup && ProbeHotkey(current.modifiers, VK_F23), "startup failure rolls back hotkey");
+        cout << "SKIP startup enable / disable / registry rollback: registry writes denied by execution environment\n";
+        next.startup = false;
+        Check(ApplyConfiguredSettings(window, state, current, next, file, error, startup.key.c_str()), "settings still usable after startup denial");
+    }
+    Check(current.key == VK_F23,
         "hotkey change succeeds once conflict removed");
     Check(ProbeHotkey(current.modifiers, VK_F24) && !ProbeHotkey(current.modifiers, VK_F23), "old registration released after change");
-    next.key = VK_F22;
-    Check(!ApplyConfiguredSettings(window, state, current, next, root / L"blocked" / L"config.json", error),
+    StartupEntry original;
+    if (startupAvailable) {
+        Check(ReadStartupEntry(startup.key.c_str(), original, error) && original.exists, "startup registered in isolated key");
+        vector<wchar_t> command(original.data.size() / sizeof(wchar_t));
+        memcpy(command.data(), original.data.data(), original.data.size());
+        Check(wstring(command.data()).starts_with(L"\"") && wstring(command.data()).ends_with(L"\" --tray"), "startup quoted path and tray argument");
+    }
+    next.key = VK_F22; next.startup = false;
+    Check(!ApplyConfiguredSettings(window, state, current, next, root / L"blocked" / L"config.json", error, startup.key.c_str()),
         "config failure rolls back candidate key");
     Check(current.key == VK_F23 && !ProbeHotkey(current.modifiers, VK_F23) && ProbeHotkey(current.modifiers, VK_F22),
         "config write failure keeps old key and releases candidate");
+    StartupEntry restored;
+    Check(ReadStartupEntry(startup.key.c_str(), restored, error) && restored.exists == original.exists && restored.data == original.data,
+        "config failure restores startup entry exactly");
+    Check(ApplyConfiguredSettings(window, state, current, next, file, error, startup.key.c_str()) && !current.startup,
+        "disable startup saves configuration");
+    Check(ReadStartupEntry(startup.key.c_str(), restored, error) && !restored.exists, "disable removes only application entry");
     ReleaseHotkeys(window, state); DestroyWindow(window);
-    Check(ProbeHotkey(current.modifiers, VK_F23), "shutdown releases hotkey");
+    Check(ProbeHotkey(current.modifiers, VK_F22), "shutdown releases hotkey");
 }
 bool AppSmoke(HINSTANCE instance, const filesystem::path& artifacts) {
+    TestStartupKey startupKey;
     HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Local\\ScreenShotPlus.Singleton");
     const DWORD created = GetLastError();
     Check(mutex != nullptr, "singleton mutex available");
@@ -323,7 +353,7 @@ bool AppSmoke(HINSTANCE instance, const filesystem::path& artifacts) {
             HWND settings = FindWindowW(L"ScreenShotPlus.Settings", nullptr);
             Check(settings && IsWindowVisible(settings), "settings opens");
             Snapshot(settings, artifacts / L"settings-ui");
-            Click(settings, 100, 472); Click(settings, 100, 612);
+            Click(settings, 100, 472); Click(settings, 100, 674);
             this_thread::sleep_for(chrono::milliseconds(100));
             wstring warning;
             Check(!IsWindowVisible(settings) && LoadConfig(file, warning).previewSeconds == 5, "UI settings persisted");
@@ -354,7 +384,7 @@ bool AppSmoke(HINSTANCE instance, const filesystem::path& artifacts) {
             Click(panel, 100, 425); ok = true;
         } catch (const exception& e) { cerr << "App smoke: " << e.what() << '\n'; PostThreadMessageW(uiThread, WM_QUIT, 1, 0); }
     });
-    const int result = RunApp(instance, file);
+    const int result = RunApp(instance, file, false, startupKey.key.c_str());
     CloseHandle(mutex);
     Check(result == 0, "app message loop / shutdown");
     observer.join(); Check(ok, "app startup / settings / exit");

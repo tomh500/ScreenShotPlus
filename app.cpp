@@ -185,7 +185,7 @@ void DrawPanel(HWND hwnd, HDC target = nullptr) {
     ui::Text(g, L"ScreenShotPlus", {78, 27, 278, 36}, 23, ui::foreground, true);
     ui::Button(g, hwnd, closeButton, L"×", false, ui::Inside(app.mouse, closeButton));
     ui::Text(g, L"截取 · 保存 · 拖动分享", {24, 92, 372, 28}, 17);
-    ui::Text(g, L"v1.5.0", {328, 98, 68, 22}, 12, ui::accent);
+    ui::Text(g, L"v1.6.0", {328, 98, 68, 22}, 12, ui::accent);
     ui::Text(g, app.notice, {24, 128, 372, 40}, 12, ui::muted);
     const array<wstring, 5> labels{L"开始区域截图   " + HotkeyText(app.config), L"显示最新截图",
         L"打开保存目录", L"设置", L"退出程序"};

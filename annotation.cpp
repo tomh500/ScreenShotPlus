@@ -74,7 +74,6 @@ bool HitAnnotation(Graphics& g, const Annotation& a, PointF p, float tolerance) 
         return false;
     }
     if (a.kind == Annotation::Arrow) {
-        auto r = AnnotationBounds(g, a);
         if (a.points.size() > 1 && hypot(p.X - a.points.back().X, p.Y - a.points.back().Y) <= max(radius, a.size * 2)) return true;
     }
     if (a.points.size() == 1) return SegmentDistance(p, a.points[0], a.points[0]) <= radius;
@@ -110,6 +109,9 @@ unique_ptr<Bitmap> BuildMosaic(Bitmap& source, int block, wstring& error) {
 void DrawMosaic(Graphics& g, Bitmap& mosaic, const Annotation& a) {
     if (a.points.size() < 2) return;
     const auto saved=g.Save(); g.SetClip(ShapeRect(a), CombineModeIntersect);
+    // Replace the covered pixels, even for transparent sources: source-over
+    // would let an annotation underneath show through a translucent mask.
+    g.SetCompositingMode(CompositingModeSourceCopy);
     g.SetInterpolationMode(InterpolationModeNearestNeighbor); g.SetPixelOffsetMode(PixelOffsetModeHalf);
     const float block=a.size;
     g.DrawImage(&mosaic, RectF(0,0,mosaic.GetWidth()*block,mosaic.GetHeight()*block),

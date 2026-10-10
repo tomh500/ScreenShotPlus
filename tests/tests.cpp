@@ -488,6 +488,10 @@ void AnnotationPixels(const filesystem::path& root) {
     auto blocks=BuildMosaic(grid,16,error);
     Check(blocks && blocks->GetWidth()==2 && blocks->GetHeight()==2,"mosaic partial edge block dimensions");
     blocks->GetPixel(0,0,&pixel); Check(pixel.GetR()==127 && pixel.GetA()==255,"mosaic averages original block pixels");
+    Bitmap transparent(160,100,PixelFormat32bppARGB);{Graphics g(&transparent);g.Clear(Color(0,0,0,0));}
+    auto privateAlpha=RenderAnnotations(transparent,{arrow,mask},error);
+    Check(privateAlpha!=nullptr,"transparent privacy image rendered");privateAlpha->GetPixel(60,20,&pixel);
+    Check(pixel.GetA()==0,"transparent mosaic replaces rather than reveals the covered annotation");
 }
 void Configuration(const filesystem::path& root) {
     const auto file = root / L"设置" / L"config.json";
@@ -671,11 +675,13 @@ void FileTransfer(const filesystem::path& file) {
     Check(filesystem::exists(file), "source preserved");
 }
 void EditorUi(HINSTANCE instance,const filesystem::path& root) {
+    const DWORD resources=GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS);
     Bitmap source(640,360,PixelFormat32bppARGB);
     {Graphics g(&source);g.Clear(Color(255,245,245,245));}
     unique_ptr<Bitmap> saved;filesystem::path file;int attempts=0,canceled=0;
+    const auto blocked=root/L"editor-blocked";{ofstream stream(blocked);stream<<"This path is a file.";}
     Check(InitEditor(instance,nullptr,[&](unique_ptr<Bitmap>& image,wstring& error){
-        ++attempts;if(attempts==1){error=L"测试保存失败，请重试。";return false;}
+        ++attempts;if(attempts==1)return SavePng(*image,blocked,file,error);
         if(!SavePng(*image,root/L"editor-ui-results",file,error))return false;saved=move(image);return true;
     },[&]{++canceled;}),"initialize modern editor");
     HWND hwnd=OwnWindow(L"ScreenShotPlus.Editor");wstring error;
@@ -688,6 +694,10 @@ void EditorUi(HINSTANCE instance,const filesystem::path& root) {
     auto dot=[&](POINT p){Click(hwnd,p.x,p.y);};
     auto drag=[&](POINT a,POINT b,UINT down=WM_LBUTTONDOWN,UINT up=WM_LBUTTONUP){Pointer(hwnd,down,a.x,a.y,MK_LBUTTON);Pointer(hwnd,WM_MOUSEMOVE,b.x,b.y,MK_LBUTTON);Pointer(hwnd,up,b.x,b.y);};
     auto number=[&](const wstring& value){Click(hwnd,125,334);for(wchar_t c:value)SendMessageW(hwnd,WM_CHAR,c,0);SendMessageW(hwnd,WM_KEYDOWN,VK_RETURN,0);SendMessageW(hwnd,WM_CHAR,L'\r',0);};
+    auto shortcut=[&](WPARAM key,bool shift=false){
+        BYTE old[256]{},state[256]{};Check(GetKeyboardState(old)!=FALSE,"read fixture keyboard state");memcpy(state,old,sizeof(state));
+        state[VK_CONTROL]=0x80;state[VK_SHIFT]=shift?0x80:0;SetKeyboardState(state);SendMessageW(hwnd,WM_KEYDOWN,key,0);SetKeyboardState(old);
+    };
     auto red=[&](int x,int y){Color c;saved->GetPixel(x,y,&c);return c.GetR()==255&&c.GetG()==0;};
     Check(ShowEditor(source,error),"open editor");Check(EditorVisible(),"editor visible");
     // Slider drag changes brush size immediately, then direct input selects an exact value.
@@ -704,7 +714,7 @@ void EditorUi(HINSTANCE instance,const filesystem::path& root) {
     FileTransfer(file);
     // Selection movement, one-step property undo, redo, and deletion.
     Check(ShowEditor(source,error),"reopen original");number(L"12");drag(point(100,100),point(180,100));Click(hwnd,75,126);
-    drag(point(140,100),point(140,140));auto d=dimensions();Click(hwnd,static_cast<int>(d.X-500),36);Click(hwnd,static_cast<int>(d.X-406),36);
+    drag(point(140,100),point(140,140));auto d=dimensions();shortcut('Z');shortcut('Z',true);
     dot(point(140,140));drag({40,386},{214,386});Click(hwnd,static_cast<int>(d.X-500),36);save();
     Check(!red(140,100)&&red(140,140)&&!red(140,155),"selection move and atomic slider undo preserve 12px stroke");
     Check(ShowEditor(source,error),"open delete case");dot(point(120,120));Click(hwnd,75,126);dot(point(120,120));SendMessageW(hwnd,WM_KEYDOWN,VK_DELETE,0);
@@ -730,11 +740,22 @@ void EditorUi(HINSTANCE instance,const filesystem::path& root) {
     // A zoomed large source uses original physical pixels; middle-button pan is reversible view state.
     Bitmap large(1984,828,PixelFormat32bppARGB);{Graphics g(&large);g.Clear(Color(255,245,245,245));}
     Check(ShowEditor(large,error),"open large image");d=dimensions();Click(hwnd,static_cast<int>(d.X-166),static_cast<int>(d.Y-26));
-    dot(point(992,414,1984,828));auto center=point(992,414,1984,828);drag(center,{center.x+80,center.y},WM_MBUTTONDOWN,WM_MBUTTONUP);
-    Snapshot(hwnd,root/L"editor-zoom-ui");save();Check(saved->GetWidth()==1984&&saved->GetHeight()==828&&red(992,414),"100 percent and pan preserve physical pixel coordinates");
+    dot(point(992,414,1984,828));auto center=point(992,414,1984,828);
+    POINT wheel{static_cast<LONG>(center.x*ui::Scale(hwnd)),static_cast<LONG>(center.y*ui::Scale(hwnd))};ClientToScreen(hwnd,&wheel);
+    SendMessageW(hwnd,WM_MOUSEWHEEL,MAKEWPARAM(0,240),MAKELPARAM(wheel.x,wheel.y));dot(point(1100,414,1984,828,1.44f));
+    drag(center,{center.x+80,center.y},WM_MBUTTONDOWN,WM_MBUTTONUP);
+    Snapshot(hwnd,root/L"editor-zoom-ui");shortcut('S');Check(saved->GetWidth()==1984&&saved->GetHeight()==828&&red(992,414)&&red(1100,414),"100 percent wheel zoom and pan preserve physical pixel coordinates");
     // Window resizing recalculates the canvas; DPI test scale is confined to this fixture window.
     Check(ShowEditor(source,error),"open resize case");SetWindowPos(hwnd,nullptr,0,0,1000,720,SWP_NOMOVE|SWP_NOZORDER);Pump(20);dot(point(200,180));Snapshot(hwnd,root/L"editor-compact-ui");save();Check(red(200,180),"resize maps pen to source coordinates");
     DestroyEditor();Check(canceled==2,"clean cancel and discard callbacks called once each");
+    const DWORD warmResources=GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS);
+    cout<<"Editor GDI initialization: "<<resources<<" -> "<<warmResources<<'\n';
+    for(int i=0;i<4;++i){
+        Check(InitEditor(instance,nullptr,[](unique_ptr<Bitmap>&,wstring&){return false;},[]{}),"recreate editor for resource test");
+        Check(ShowEditor(source,error),"reopen resource fixture");hwnd=OwnWindow(L"ScreenShotPlus.Editor");
+        Snapshot(hwnd,root/(L"editor-resource-ui-"+to_wstring(i)));DestroyEditor();
+        Check(GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS)<=warmResources+2,"repeated editor windows release paint and image resources");
+    }
     cout<<"PASS editor sliders / exact input / held buttons / selection / atomic undo-redo / Unicode / RGB / shapes / masks / close protection / zoom-pan / resize / save retry\n";
 }
 void SettingsFailureUi(HINSTANCE instance, const filesystem::path& root) {
@@ -1605,4 +1626,3 @@ int wmain(int argc, wchar_t** argv) {
     CancelVisualEffects(); CancelSelection(); DestroyEditor(); DestroySettings(); DestroyPreview();
     GdiplusShutdown(token); OleUninitialize(); return code;
 }
-

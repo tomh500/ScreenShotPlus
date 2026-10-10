@@ -53,7 +53,7 @@ void Relayout(){
     layout.close={w-46,20,28,32};layout.maximize={w-82,20,28,32};layout.save={w-260,18,164,38};layout.cancel={w-354,18,82,38};
     layout.redo={w-448,18,82,38};layout.undo={w-542,18,82,38};
     layout.canvas={252,82,w-276,h-132-(editor.textActive?126.0f:0.0f)};layout.input={264,h-164,w-300,100};
-    layout.minus={w-354,h-40,30,28};layout.plus={w-250,h-40,30,28};layout.actual={w-204,h-40,74,28};layout.fit={w-120,h-40,96,28};
+    layout.minus={w-374,h-40,30,28};layout.plus={w-270,h-40,30,28};layout.actual={w-224,h-40,94,28};layout.fit={w-120,h-40,96,28};
 }
 RectF ImageRect(){
     if(!editor.source)return {};const float s=editor.zoom/Dpi(),w=editor.source->GetWidth()*s,h=editor.source->GetHeight()*s;
@@ -72,6 +72,7 @@ void Fit(){
 bool ImagePoint(PointF p,PointF& point,bool clampPoint=false){
     if(!editor.source)return false;const auto r=ImageRect();
     if(!clampPoint&&(!layout.canvas.Contains(p)||!r.Contains(p)))return false;
+    if(!clampPoint&&!editor.notice.empty()&&p.Y<162)return false;
     point={clamp((p.X-r.X)*Dpi()/editor.zoom,0.0f,static_cast<float>(editor.source->GetWidth()-1)),clamp((p.Y-r.Y)*Dpi()/editor.zoom,0.0f,static_cast<float>(editor.source->GetHeight()-1))};return true;
 }
 void Zoom(float zoom,POINT anchor){
@@ -286,10 +287,15 @@ void DrawEditor(HWND hwnd,HDC target=nullptr){
         }
     }else if(kind==Annotation::Mosaic)ui::Text(g,L"8 / 16 / 24 / 32 px\n从原图取色，覆盖区域内标注。",{32,420,190,76},12,ui::muted);
     else ui::Text(g,L"点击图片中的标注，\n即可移动、删除或调整属性。",{32,420,190,76},12,ui::muted);
-    DrawCanvas(g);if(editor.textActive)DrawTextInput(g);
+    DrawCanvas(g);
+    if(!editor.notice.empty()){
+        ui::Round(g,{252,82,layout.width-276,72},8,Color(255,58,38,40));
+        ui::Text(g,editor.notice,{264,92,layout.width-300,56},12,ui::danger);
+    }
+    if(editor.textActive)DrawTextInput(g);
     if(editor.source)ui::Text(g,to_wstring(editor.source->GetWidth())+L" × "+to_wstring(editor.source->GetHeight())+L" px",{24,layout.height-37,220,24},12,ui::muted);
     Button(g,layout.minus,L"−");Button(g,layout.plus,L"+");Button(g,layout.actual,L"100%");Button(g,layout.fit,L"适应画布");ui::Text(g,to_wstring(static_cast<int>(lround(editor.zoom*100)))+L"%",{layout.minus.GetRight()+8,layout.height-35,64,22},12);
-    ui::Text(g,editor.notice.empty()?Hint():editor.notice,{264,layout.height-38,max(40.0f,layout.width-638),30},11,editor.notice.empty()?ui::muted:ui::danger);
+    ui::Text(g,editor.notice.empty()?Hint():L"编辑内容已保留，请修正问题后重试保存。",{264,layout.height-38,max(40.0f,layout.width-658),30},11,editor.notice.empty()?ui::muted:ui::danger);
     if(editor.confirm){
         SolidBrush shade(Color(180,0,0,0));g.FillRectangle(&shade,0.0f,0.0f,layout.width,layout.height);const auto r=layout.Dialog();ui::Round(g,r,14,ui::surface);ui::Border(g,r,14,ui::accent);
         ui::Text(g,L"保留这次编辑吗？",{r.X+24,r.Y+22,430,32},22,ui::foreground,true);ui::Text(g,L"图片中有未保存的修改，原截图始终保留。",{r.X+24,r.Y+72,430,48},14,ui::muted);
@@ -391,6 +397,7 @@ LRESULT CALLBACK EditorProc(HWND hwnd,UINT msg,WPARAM wparam,LPARAM lparam){
     case WM_KEYDOWN:{
         if(editor.composing)break;const bool ctrl=(GetKeyState(VK_CONTROL)&0x8000)!=0,shift=(GetKeyState(VK_SHIFT)&0x8000)!=0;
         if(editor.confirm){if(wparam==VK_ESCAPE){editor.confirm=false;Refresh();}return 0;}
+        if(ctrl&&wparam=='S'){Save();return 0;}
         if(editor.numberActive){
             if(wparam==VK_ESCAPE)FinishNumber(false);else if(wparam==VK_RETURN){FinishNumber(true);editor.swallowReturn=true;}else if(ctrl&&wparam=='A')editor.numberAll=true;
             else if(wparam==VK_BACK||wparam==VK_DELETE){if(editor.numberAll)editor.numberText.clear();else if(!editor.numberText.empty())editor.numberText.pop_back();editor.numberAll=false;Refresh();}
@@ -399,7 +406,7 @@ LRESULT CALLBACK EditorProc(HWND hwnd,UINT msg,WPARAM wparam,LPARAM lparam){
         if(wparam==VK_ESCAPE){
             if(editor.drawing||editor.moving||editor.panning)CancelGesture();else if(editor.rgb){editor.rgb=false;Refresh();}else if(editor.textActive)CancelText();else if(editor.selected>=0){editor.selected=-1;Refresh();}else RequestClose();return 0;
         }
-        if(ctrl&&wparam=='S'){Save();return 0;}if(ctrl&&wparam=='Z'){Undo(shift);return 0;}if(ctrl&&wparam=='Y'){if(!editor.textActive)Undo(true);return 0;}
+        if(ctrl&&wparam=='Z'){Undo(shift);return 0;}if(ctrl&&wparam=='Y'){if(!editor.textActive)Undo(true);return 0;}
         if(editor.textActive){
             if(ctrl&&wparam=='A'){editor.anchor=0;editor.caret=editor.draft.text.size();Refresh();return 0;}
             if(ctrl&&(wparam=='C'||wparam=='X')){CopyText(wparam=='X');return 0;}if(ctrl&&wparam=='V'){PasteText();return 0;}
@@ -452,4 +459,3 @@ bool ShowEditor(Bitmap& image,wstring& error){
 void FocusEditor(){if(EditorVisible()){SetForegroundWindow(editor.window);SetFocus(editor.window);}}
 bool EditorVisible(){return editor.window&&IsWindowVisible(editor.window);}
 void DestroyEditor(){if(editor.window){ResetContent();DestroyWindow(editor.window);editor.window=nullptr;}editor.save={};editor.cancel={};}
-

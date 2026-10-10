@@ -670,60 +670,72 @@ void FileTransfer(const filesystem::path& file) {
     Check(FAILED(DragFile(file.parent_path() / L"missing.png", copy)) && copy == DROPEFFECT_NONE, "missing source handled");
     Check(filesystem::exists(file), "source preserved");
 }
-void EditorUi(HINSTANCE instance, const filesystem::path& root) {
-    Bitmap source(640, 360, PixelFormat32bppARGB);
-    { Graphics g(&source); g.Clear(Color(255, 245, 245, 245)); }
-    unique_ptr<Bitmap> saved; filesystem::path file; int attempts = 0, canceled = 0;
-    Check(InitEditor(instance, nullptr, [&](unique_ptr<Bitmap>& image, wstring& error) {
-        ++attempts;
-        if (attempts == 1) return SavePng(*image, root / L"blocked", file, error);
-        if (!SavePng(*image, root / L"editor-ui-results", file, error)) return false;
-        saved = move(image); return true;
-    }, [&] { ++canceled; }), "initialize custom editor");
-    wstring error; Check(ShowEditor(source, error), "open editor");
-    HWND hwnd = OwnWindow(L"ScreenShotPlus.Editor"); Check(hwnd && EditorVisible(), "editor window visible");
-    Pointer(hwnd, WM_LBUTTONDOWN, 240, 247, MK_LBUTTON);
-    Pointer(hwnd, WM_MOUSEMOVE, 320, 247, MK_LBUTTON);
-    Pointer(hwnd, WM_LBUTTONUP, 400, 247);
-    Click(hwnd, 250, 267); Click(hwnd, 520, 96);
-    Click(hwnd, 170, 96); Click(hwnd, 240, 307);
-    for (const wchar_t c : wstring(L"标注 A")) SendMessageW(hwnd, WM_CHAR, c, 0);
-    Click(hwnd, 442, 96); Click(hwnd, 442, 96);
-    Click(hwnd, 430, 144); Snapshot(hwnd, root / L"editor-text-ui");
-    SendMessageW(hwnd, WM_CHAR, L'\r', 0);
-    Click(hwnd, 245, 312); Click(hwnd, 510, 144);
-    Click(hwnd, 660, 96);
-    Click(hwnd, 910, 144); Click(hwnd, 870, 232); Click(hwnd, 814, 280); Click(hwnd, 934, 328);
-    Snapshot(hwnd, root / L"editor-rgb-ui");
-    Click(hwnd, 910, 144); Click(hwnd, 70, 96);
-    Pointer(hwnd, WM_LBUTTONDOWN, 240, 447, MK_LBUTTON);
-    Pointer(hwnd, WM_LBUTTONUP, 400, 447);
-    Snapshot(hwnd, root / L"editor-ui");
-    Click(hwnd, 900, 724);
-    Check(EditorVisible() && attempts == 1 && !saved, "save failure retains editor and annotations");
-    Snapshot(hwnd, root / L"editor-error-ui"); Click(hwnd, 900, 724);
-    Check(!EditorVisible() && saved && attempts == 2 && filesystem::exists(file), "retry saves edited PNG and closes editor");
-    Color pixel; saved->GetPixel(100, 40, &pixel); Check(pixel.GetR() == 255 && pixel.GetG() == 0, "editor brush coordinates map to image pixels");
-    saved->GetPixel(50, 60, &pixel); Check(pixel.GetR() == 245 && pixel.GetG() == 245, "editor undo removes latest dot");
-    saved->GetPixel(100, 240, &pixel);
-    Check(abs(pixel.GetR() - 128) <= 2 && abs(pixel.GetG() - 64) <= 2 && abs(pixel.GetB() - 200) <= 2, "RGB custom pen exported");
-    bool purple = false;
-    for (int y = 100; y < 150; ++y) for (int x = 40; x < 220; ++x) {
-        saved->GetPixel(x, y, &pixel); if (pixel.GetR() > pixel.GetG() + 50 && pixel.GetB() > pixel.GetG() + 50) purple = true;
-    }
-    Check(purple, "existing text size and color edits exported");
+void EditorUi(HINSTANCE instance,const filesystem::path& root) {
+    Bitmap source(640,360,PixelFormat32bppARGB);
+    {Graphics g(&source);g.Clear(Color(255,245,245,245));}
+    unique_ptr<Bitmap> saved;filesystem::path file;int attempts=0,canceled=0;
+    Check(InitEditor(instance,nullptr,[&](unique_ptr<Bitmap>& image,wstring& error){
+        ++attempts;if(attempts==1){error=L"测试保存失败，请重试。";return false;}
+        if(!SavePng(*image,root/L"editor-ui-results",file,error))return false;saved=move(image);return true;
+    },[&]{++canceled;}),"initialize modern editor");
+    HWND hwnd=OwnWindow(L"ScreenShotPlus.Editor");wstring error;
+    auto dimensions=[&]{RECT r{};GetClientRect(hwnd,&r);return PointF(r.right/ui::Scale(hwnd),r.bottom/ui::Scale(hwnd));};
+    auto save=[&]{auto d=dimensions();Click(hwnd,static_cast<int>(d.X-180),36);};
+    auto point=[&](float x,float y,int w=640,int h=360,float zoom=1,bool text=false){
+        auto d=dimensions();const float scale=ui::Scale(hwnd),cw=d.X-276,ch=d.Y-132-(text?126:0);
+        return POINT{static_cast<LONG>(lround(252+cw/2+(x-w/2.0f)*zoom/scale)),static_cast<LONG>(lround(82+ch/2+(y-h/2.0f)*zoom/scale))};
+    };
+    auto dot=[&](POINT p){Click(hwnd,p.x,p.y);};
+    auto drag=[&](POINT a,POINT b,UINT down=WM_LBUTTONDOWN,UINT up=WM_LBUTTONUP){Pointer(hwnd,down,a.x,a.y,MK_LBUTTON);Pointer(hwnd,WM_MOUSEMOVE,b.x,b.y,MK_LBUTTON);Pointer(hwnd,up,b.x,b.y);};
+    auto number=[&](const wstring& value){Click(hwnd,125,334);for(wchar_t c:value)SendMessageW(hwnd,WM_CHAR,c,0);SendMessageW(hwnd,WM_KEYDOWN,VK_RETURN,0);SendMessageW(hwnd,WM_CHAR,L'\r',0);};
+    auto red=[&](int x,int y){Color c;saved->GetPixel(x,y,&c);return c.GetR()==255&&c.GetG()==0;};
+    Check(ShowEditor(source,error),"open editor");Check(EditorVisible(),"editor visible");
+    // Slider drag changes brush size immediately, then direct input selects an exact value.
+    drag({40,386},{214,386});dot(point(100,50));number(L"12");dot(point(200,50));
+    // Holding + repeats without repeated clicks; loss of capture must stop the timer.
+    RECT originalWindow{};GetWindowRect(hwnd,&originalWindow);POINT cursor{},control{static_cast<LONG>(204*ui::Scale(hwnd)),static_cast<LONG>(334*ui::Scale(hwnd))};
+    GetCursorPos(&cursor);ClientToScreen(hwnd,&control);
+    SetWindowPos(hwnd,nullptr,originalWindow.left+cursor.x-control.x,originalWindow.top+cursor.y-control.y,0,0,SWP_NOSIZE|SWP_NOZORDER);
+    Pointer(hwnd,WM_LBUTTONDOWN,204,334,MK_LBUTTON);Pump(550);Pointer(hwnd,WM_LBUTTONUP,204,334);
+    SetWindowPos(hwnd,nullptr,originalWindow.left,originalWindow.top,0,0,SWP_NOSIZE|SWP_NOZORDER);dot(point(300,50));
+    Snapshot(hwnd,root/L"editor-slider-ui");save();Check(EditorVisible()&&attempts==1,"save failure retains editing state");
+    Snapshot(hwnd,root/L"editor-error-ui");save();Check(!EditorVisible()&&attempts==2&&saved,"save retry succeeds");
+    Check(red(100,66)&&!red(100,72),"slider reaches 40 pixel brush");Check(red(200,54)&&!red(200,60),"numeric brush size 12 exported");Check(red(300,56),"holding plus repeatedly increases brush size");
     FileTransfer(file);
-    Check(ShowEditor(*saved, error), "reopen edited PNG"); Click(hwnd, 750, 724);
-    Check(!EditorVisible() && canceled == 1 && attempts == 2, "cancel preserves last saved image");
-    Bitmap large(1984, 828, PixelFormat32bppARGB);
-    { Graphics g(&large); g.Clear(Color(255, 245, 245, 245)); }
-    Check(ShowEditor(large, error), "open image larger than editor canvas");
-    Pointer(hwnd, WM_LBUTTONDOWN, 124, 280, MK_LBUTTON);
-    Pointer(hwnd, WM_LBUTTONUP, 224, 280); Click(hwnd, 900, 724);
-    saved->GetPixel(300, 200, &pixel);
-    Check(saved->GetWidth() == 1984 && saved->GetHeight() == 828 && pixel.GetR() == 255 && pixel.GetG() == 0,
-        "scaled-down canvas maps annotation to original physical pixels");
-    DestroyEditor();
+    // Selection movement, one-step property undo, redo, and deletion.
+    Check(ShowEditor(source,error),"reopen original");number(L"12");drag(point(100,100),point(180,100));Click(hwnd,75,126);
+    drag(point(140,100),point(140,140));auto d=dimensions();Click(hwnd,static_cast<int>(d.X-500),36);Click(hwnd,static_cast<int>(d.X-406),36);
+    dot(point(140,140));drag({40,386},{214,386});Click(hwnd,static_cast<int>(d.X-500),36);save();
+    Check(!red(140,100)&&red(140,140)&&!red(140,155),"selection move and atomic slider undo preserve 12px stroke");
+    Check(ShowEditor(source,error),"open delete case");dot(point(120,120));Click(hwnd,75,126);dot(point(120,120));SendMessageW(hwnd,WM_KEYDOWN,VK_DELETE,0);
+    SendMessageW(hwnd,WM_CLOSE,0,0);Check(!EditorVisible(),"delete all marks allows clean close");
+    // Text cursor edits and sizing must not accidentally commit the draft on numeric Enter.
+    Check(ShowEditor(source,error),"open text case");Click(hwnd,75,222);dot(point(60,70));
+    for(wchar_t c:wstring(L"标注 AB"))SendMessageW(hwnd,WM_CHAR,c,0);
+    SendMessageW(hwnd,WM_KEYDOWN,VK_LEFT,0);SendMessageW(hwnd,WM_CHAR,L'X',0);SendMessageW(hwnd,WM_KEYDOWN,VK_HOME,0);SendMessageW(hwnd,WM_CHAR,L'>',0);
+    number(L"48");Click(hwnd,145,510);Snapshot(hwnd,root/L"editor-text-ui");
+    SendMessageW(hwnd,WM_CHAR,L'\r',0);Click(hwnd,75,126);
+    POINT textPoint=point(75,85);Pointer(hwnd,WM_LBUTTONDBLCLK,textPoint.x,textPoint.y);SendMessageW(hwnd,WM_KEYDOWN,VK_END,0);SendMessageW(hwnd,WM_CHAR,L'!',0);SendMessageW(hwnd,WM_CHAR,L'\r',0);save();
+    bool purple=false;for(int y=70;y<145;++y)for(int x=60;x<330;++x){Color c;saved->GetPixel(x,y,&c);if(c.GetB()>c.GetG()+50&&c.GetR()>c.GetG()+50)purple=true;}Check(purple,"sized edited Unicode text exported");
+    // Shapes and privacy masks, plus RGB controls that remain outside the canvas.
+    Check(ShowEditor(source,error),"open shapes case");Click(hwnd,75,174);drag(point(100,100),point(250,100));
+    Click(hwnd,175,174);drag(point(400,220),point(300,140));Click(hwnd,175,222);drag(point(80,80),point(260,120));
+    Snapshot(hwnd,root/L"editor-mosaic-ui");save();Check(!red(180,100)&&red(300,180),"mosaic covers arrow and reversed rectangle remains");
+    Check(ShowEditor(source,error),"open RGB case");Click(hwnd,175,420);Click(hwnd,135,468);Click(hwnd,96,512);Click(hwnd,178,556);dot(point(200,180));Snapshot(hwnd,root/L"editor-rgb-ui");save();
+    Color rgb;saved->GetPixel(200,180,&rgb);Check(abs(rgb.GetR()-128)<=2&&abs(rgb.GetG()-63)<=2&&abs(rgb.GetB()-199)<=2,"RGB custom brush exported");
+    // Unsaved-close protection and Continue/Discard choices.
+    Check(ShowEditor(source,error),"open close protection case");dot(point(100,100));SendMessageW(hwnd,WM_CLOSE,0,0);Check(EditorVisible(),"dirty close opens self-drawn confirmation");
+    d=dimensions();Snapshot(hwnd,root/L"editor-confirm-ui");Click(hwnd,static_cast<int>((d.X-480)/2+386),static_cast<int>((d.Y-210)/2+165));Check(EditorVisible(),"continue editing preserves page");
+    SendMessageW(hwnd,WM_CLOSE,0,0);Click(hwnd,static_cast<int>((d.X-480)/2+238),static_cast<int>((d.Y-210)/2+165));Check(!EditorVisible(),"discard closes editor");
+    // A zoomed large source uses original physical pixels; middle-button pan is reversible view state.
+    Bitmap large(1984,828,PixelFormat32bppARGB);{Graphics g(&large);g.Clear(Color(255,245,245,245));}
+    Check(ShowEditor(large,error),"open large image");d=dimensions();Click(hwnd,static_cast<int>(d.X-166),static_cast<int>(d.Y-26));
+    dot(point(992,414,1984,828));auto center=point(992,414,1984,828);drag(center,{center.x+80,center.y},WM_MBUTTONDOWN,WM_MBUTTONUP);
+    Snapshot(hwnd,root/L"editor-zoom-ui");save();Check(saved->GetWidth()==1984&&saved->GetHeight()==828&&red(992,414),"100 percent and pan preserve physical pixel coordinates");
+    // Window resizing recalculates the canvas; DPI test scale is confined to this fixture window.
+    Check(ShowEditor(source,error),"open resize case");SetWindowPos(hwnd,nullptr,0,0,1000,720,SWP_NOMOVE|SWP_NOZORDER);Pump(20);dot(point(200,180));Snapshot(hwnd,root/L"editor-compact-ui");save();Check(red(200,180),"resize maps pen to source coordinates");
+    DestroyEditor();Check(canceled==2,"clean cancel and discard callbacks called once each");
+    cout<<"PASS editor sliders / exact input / held buttons / selection / atomic undo-redo / Unicode / RGB / shapes / masks / close protection / zoom-pan / resize / save retry\n";
 }
 void SettingsFailureUi(HINSTANCE instance, const filesystem::path& root) {
     const auto file = root / L"blocked" / L"config.json";
@@ -1310,14 +1322,17 @@ bool AppSmoke(HINSTANCE instance, const filesystem::path& artifacts, bool isolat
             Check(EditorVisible() && !PreviewVisible(), "preview click opens editor and hides preview");
             SendMessageW(panel, WM_HOTKEY, 1, 0); SendMessageW(panel, WM_SHOW_PANEL, 0, 0);
             Check(!OwnWindow(L"ScreenShotPlus.Selection") && !IsWindowVisible(panel) && EditorVisible(), "editing blocks capture and panel");
-            Pointer(editor, WM_LBUTTONDOWN, 490, 370, MK_LBUTTON);
-            Pointer(editor, WM_LBUTTONUP, 540, 370); Click(editor, 900, 724);
+            RECT editorRect{};GetClientRect(editor,&editorRect);const float editorScale=ui::Scale(editor);
+            const float editorWidth=editorRect.right/editorScale,editorHeight=editorRect.bottom/editorScale;
+            const int imageLeft=static_cast<int>(252+(editorWidth-276)/2-40/editorScale),imageTop=static_cast<int>(82+(editorHeight-132)/2-30/editorScale);
+            Pointer(editor,WM_LBUTTONDOWN,imageLeft+static_cast<int>(10/editorScale),imageTop+static_cast<int>(30/editorScale),MK_LBUTTON);
+            Pointer(editor,WM_LBUTTONUP,imageLeft+static_cast<int>(60/editorScale),imageTop+static_cast<int>(30/editorScale));Click(editor,static_cast<int>(editorWidth-180),36);
             Check(!EditorVisible() && PreviewVisible(), "edited save returns to preview");
             vector<filesystem::path> editedFiles;
             for (const auto& item : filesystem::directory_iterator(initial.folder))
                 if (item.path().extension() == L".png" && item.path() != screenshots[0]) editedFiles.push_back(item.path());
             Check(editedFiles.size() == 1 && filesystem::exists(screenshots[0]), "edited image saved separately from original");
-            { Bitmap image(editedFiles[0].c_str()); Color pixel; image.GetPixel(30, 13, &pixel);
+            { Bitmap image(editedFiles[0].c_str()); Color pixel; image.GetPixel(30, 30, &pixel);
                 Check(image.GetWidth() == 80 && image.GetHeight() == 60 && pixel.GetR() == 255 && pixel.GetG() == 0, "application saves annotations at original resolution"); }
             FileTransfer(editedFiles[0]);
             Click(preview, 100, 100); Check(EditorVisible(), "edited preview can reopen editor");
@@ -1531,6 +1546,7 @@ int wmain(int argc, wchar_t** argv) {
     const bool appOnly = argc > 1 && wstring_view(argv[1]) == L"--app-ui";
     const bool personalizationOnly = argc > 1 && wstring_view(argv[1]) == L"--personalization-ui";
     const bool animationOnly = argc > 1 && wstring_view(argv[1]) == L"--animation-ui";
+    const bool editorOnly = argc > 1 && wstring_view(argv[1]) == L"--editor-ui";
     bool liveUi = !(argc > 1 && wstring_view(argv[1]) == L"--no-ui");
     HANDLE running = OpenMutexW(SYNCHRONIZE, FALSE, L"Local\\ScreenShotPlus.Singleton");
     if (running) { CloseHandle(running); if (!isolatedUi) liveUi = false; }
@@ -1542,6 +1558,7 @@ int wmain(int argc, wchar_t** argv) {
     int code = 0;
     try {
         filesystem::create_directories(root);
+        if (editorOnly) { AnnotationPixels(root); EditorUi(GetModuleHandleW(nullptr), root); }
         if (appOnly) {
             WNDCLASSEXW cls{sizeof(cls)}; cls.hInstance = GetModuleHandleW(nullptr); cls.lpfnWndProc = PatternProc;
             cls.lpszClassName = L"ScreenShotPlus.TestPattern"; Check(RegisterClassExW(&cls) != 0, "register app capture fixture");
@@ -1551,7 +1568,7 @@ int wmain(int argc, wchar_t** argv) {
         if (personalizationOnly) { Configuration(root); PersonalizationUi(GetModuleHandleW(nullptr), root); }
         AnimationTiming(); cout << "PASS fractional refresh / 120 fallback / interrupted curves / time-based duration / five motion tiers / speeds / reduced motion\n";
         LaunchTiming(); cout << "PASS exact launch quotes / initialization readiness / ordered phases / adaptive time-based clocks / readable durations\n";
-        if (liveUi && !personalizationOnly && !appOnly) {
+        if (liveUi && !personalizationOnly && !appOnly && !editorOnly) {
             AnimationUi(GetModuleHandleW(nullptr), root); cout << "PASS animation frames / hover / toggle / press / idle / hide / reopen / GDI lifetime\n";
             RichEffectsUi(GetModuleHandleW(nullptr), root); cout << "PASS layered flight / drag card / copy feedback / cancel return / accepted drop / input transparency / resource lifetime (visual fixture, not client acceptance)\n";
             CustomizationUi(GetModuleHandleW(nullptr), root); cout << "PASS capture customization / original pixels / entrance off / preview corner and size / physical DPI / restrained tiers (isolated native UI fixture)\n";
@@ -1559,7 +1576,7 @@ int wmain(int argc, wchar_t** argv) {
             PersonalizationUi(GetModuleHandleW(nullptr), root);
             StartupUi(filesystem::absolute(argv[0]), root); cout << "PASS persisted extreme and ultimate startup / poem to voyage / readable duration / interruption / disabled and lower-tier suppression / silent tray startup / normal shutdown (isolated child application fixture)\n";
         }
-        if (!animationOnly && !personalizationOnly && !appOnly) {
+        if (!animationOnly && !personalizationOnly && !appOnly && !editorOnly) {
         Geometry(); cout << "PASS selection geometry\n";
         InstanceProcesses(filesystem::absolute(argv[0])); cout << "PASS 8 concurrent processes / single-instance mutex / restart\n";
         InstanceActivation(GetModuleHandleW(nullptr)); cout << "PASS delayed primary window / duplicate activation\n";
@@ -1588,3 +1605,4 @@ int wmain(int argc, wchar_t** argv) {
     CancelVisualEffects(); CancelSelection(); DestroyEditor(); DestroySettings(); DestroyPreview();
     GdiplusShutdown(token); OleUninitialize(); return code;
 }
+

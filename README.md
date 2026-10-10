@@ -98,6 +98,23 @@ v1.1.1 增强了命名互斥锁：同一登录会话内的不同目录、不同�
 
 交付以 `x64\Release\ScreenShotPlus.exe` 为准，由用户直接发布；日常工作不打包、不更新 dist。构建脚本会输出本次 EXE 的完整路径与版本。只有用户明确要求打包时才使用 `-Package`；EXE 运行仅依赖 Windows 系统 DLL。
 
+## 自动构建与 nightly
+
+工作流位于 `.github/workflows/build-nightly.yml`。所有分支的源代码、头文件、资源、项目文件、依赖配置、工具或工作流发生改动时触发构建；面向 main 的 PR 也会构建。仅修改 Markdown 文档不会触发，另可在 Actions 页面手动运行 **Build and Nightly**。
+
+- 使用 Windows Server 2022 / VS 2022 构建 Release x64，依赖按 `vcpkg.json` 的固定 baseline 准备，保持静态 CRT 与静态依赖。
+- CI 执行 `tools/build.ps1 -Configuration Release -Test -Headless`：构建应用和测试，运行 `--no-ui` 基础回归。日常 `-Test` 继续运行原有完整回归；`-Headless` 仅与 `-Test` 一起使用。
+- 成功构建在当前运行中上传 `ScreenShotPlus-Release-x64`，包含 `ScreenShotPlus.exe` 和 SHA-256 校验文件，保留 14 天。
+- 只有 main 的 push 或 main 上的手动运行会创建/更新 [nightly 预发布](https://github.com/tomh500/ScreenShotPlus/releases/tag/nightly)。nightly 标签指向本次成功构建的提交，附件沿用固定文件名；普通分支和 PR 不更新 nightly。首次推送此工作流并成功运行后才会出现该预发布。
+- nightly 发布前核对 EXE 校验值，更新附件并移动 nightly 标签；发布任务拥有 `contents: write`，构建任务保持只读。使用 GitHub 自动提供的 `GITHUB_TOKEN`，无需另存个人访问令牌。同一分支串行运行，不自动中断进行中的发布；旧提交重跑不会覆盖更新的 nightly。
+
+固定下载地址：
+
+- [ScreenShotPlus.exe](https://github.com/tomh500/ScreenShotPlus/releases/download/nightly/ScreenShotPlus.exe)
+- [ScreenShotPlus.exe.sha256](https://github.com/tomh500/ScreenShotPlus/releases/download/nightly/ScreenShotPlus.exe.sha256)
+
+此流程不生成项目 ZIP、不更新 dist、不提交二进制文件。GitHub Actions 下载整个 artifact 时生成的归档由平台处理。云端基础测试不代表 QQ/微信/浏览器拖入、混合 DPI 多屏或真实输入法验收。
+
 ## 验证范围
 
 独立测试工程 `tests\ScreenShotPlus.Tests.vcxproj` 覆盖区域坐标、配置读写和损坏回退、PNG 像素与尺寸、中文路径、文件名唯一性、真实文件权限拒绝、保存失败、OLE 文件数据、实际桌面裁剪、取消、GDI 资源释放、悬停/拖拽计时暂停、真实热键冲突与事务回退、应用内自动保存、设置持久化、重复触发、单实例和退出。首版实际结果见 [VERIFICATION.md](VERIFICATION.md)。

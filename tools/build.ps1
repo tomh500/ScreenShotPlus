@@ -1,9 +1,11 @@
 param(
     [ValidateSet('Release', 'Debug')][string]$Configuration = 'Release',
     [switch]$Test,
+    [switch]$Headless,
     [switch]$Package
 )
 $ErrorActionPreference = 'Stop'
+if ($Headless -and !$Test) { throw '-Headless 必须与 -Test 一起使用。' }
 $taskRoot = Split-Path -Parent $PSScriptRoot
 $taskVswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 if (!(Test-Path -LiteralPath $taskVswhere)) { throw '未找到 VS Installer / vswhere。' }
@@ -19,7 +21,8 @@ try {
     if ($Test) {
         & $taskMsbuild tests\ScreenShotPlus.Tests.vcxproj /m /t:Build "/p:Configuration=$Configuration" /p:Platform=x64 /nologo /verbosity:minimal
         if ($LASTEXITCODE -ne 0) { throw '测试构建失败。' }
-        & ".\build\tests\$Configuration\ScreenShotPlus.Tests.exe"
+        [string[]]$taskTestArguments = if ($Headless) { @('--no-ui') } else { @() }
+        & ".\build\tests\$Configuration\ScreenShotPlus.Tests.exe" @taskTestArguments
         if ($LASTEXITCODE -ne 0) { throw '测试失败。' }
     }
     if ($Package) {

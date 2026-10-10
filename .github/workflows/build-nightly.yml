@@ -1,0 +1,167 @@
+name: Build and Nightly
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - '**/*.cpp'
+      - '**/*.c'
+      - '**/*.h'
+      - '**/*.hpp'
+      - '**/*.inl'
+      - '**/*.rc'
+      - '**/*.ico'
+      - '**/*.manifest'
+      - '**/*.sln'
+      - '**/*.vcxproj'
+      - '**/*.vcxproj.filters'
+      - '**/*.props'
+      - '**/*.targets'
+      - 'vcpkg*.json'
+      - 'tools/**'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**/*.cpp'
+      - '**/*.c'
+      - '**/*.h'
+      - '**/*.hpp'
+      - '**/*.inl'
+      - '**/*.rc'
+      - '**/*.ico'
+      - '**/*.manifest'
+      - '**/*.sln'
+      - '**/*.vcxproj'
+      - '**/*.vcxproj.filters'
+      - '**/*.props'
+      - '**/*.targets'
+      - 'vcpkg*.json'
+      - 'tools/**'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialize runs for a ref, including publication. Do not interrupt an upload.
+concurrency:
+  group: build-nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Release x64
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      VCPKG_DISABLE_METRICS: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Prepare pinned vcpkg
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $taskBaseline = (Get-Content vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+          if ($taskBaseline -notmatch '^[0-9a-f]{40}$') { throw 'Invalid vcpkg baseline.' }
+          $taskVcpkg = Join-Path $env:RUNNER_TEMP 'screenshotplus-vcpkg'
+          git init $taskVcpkg
+          git -C $taskVcpkg remote add origin https://github.com/microsoft/vcpkg.git
+          git -C $taskVcpkg fetch --depth 1 origin $taskBaseline
+          git -C $taskVcpkg checkout --detach FETCH_HEAD
+          & (Join-Path $taskVcpkg 'bootstrap-vcpkg.bat') -disableMetrics
+          "VCPKG_ROOT=$taskVcpkg" >> $env:GITHUB_ENV
+
+      - name: Build and test
+        run: ./tools/build.ps1 -Configuration Release -Test -Headless
+
+      - name: Prepare EXE and checksum
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $taskOutput = Join-Path $env:GITHUB_WORKSPACE 'build/nightly'
+          New-Item -ItemType Directory -Path $taskOutput -Force | Out-Null
+          $taskExe = Join-Path $taskOutput 'ScreenShotPlus.exe'
+          Copy-Item -LiteralPath 'x64/Release/ScreenShotPlus.exe' -Destination $taskExe
+          $taskHash = (Get-FileHash -LiteralPath $taskExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          [System.IO.File]::WriteAllText("$taskExe.sha256", "$taskHash  ScreenShotPlus.exe" + [char]10, [System.Text.UTF8Encoding]::new($false))
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: ScreenShotPlus-Release-x64
+          path: |
+            build/nightly/ScreenShotPlus.exe
+            build/nightly/ScreenShotPlus.exe.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  nightly:
+    name: Publish nightly
+    needs: build
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BUILD_SHA: ${{ github.sha }}
+      BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Checkout publication history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download verified build
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: ScreenShotPlus-Release-x64
+          path: build/nightly
+
+      - name: Update nightly tag and release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd build/nightly
+          sha256sum --check ScreenShotPlus.exe.sha256
+
+          # An older rerun must not replace a newer successful nightly build.
+          if git show-ref --verify --quiet refs/tags/nightly; then
+            previous=$(git rev-parse 'refs/tags/nightly^{commit}')
+            if [[ "$previous" != "$BUILD_SHA" ]] && git merge-base --is-ancestor "$BUILD_SHA" "$previous"; then
+              echo 'A newer nightly build is already published; keeping it.'
+              exit 0
+            fi
+          fi
+
+          printf '%s\n\n%s\n%s\n%s\n' \
+            'Automatic Windows x64 Release build. This is a prerelease.' \
+            "Commit: $BUILD_SHA" "Build: $BUILD_URL" \
+            'Download ScreenShotPlus.exe and verify it with ScreenShotPlus.exe.sha256.' > notes.md
+
+          # Only a 404 means missing; permission/network failures stop the job.
+          status=$(gh api "repos/$GH_REPO/releases/tags/nightly" --include 2>/dev/null | head -n 1 || true)
+          if [[ "$status" == *' 404'* ]]; then
+            if git show-ref --verify --quiet refs/tags/nightly; then
+              gh api --method PATCH "repos/$GH_REPO/git/refs/tags/nightly" -f sha="$BUILD_SHA" -F force=true
+            fi
+            gh release create nightly ScreenShotPlus.exe ScreenShotPlus.exe.sha256 \
+              --target "$BUILD_SHA" --title 'Nightly' --notes-file notes.md --prerelease --latest=false
+          elif [[ "$status" == *' 200'* ]]; then
+            gh release upload nightly ScreenShotPlus.exe ScreenShotPlus.exe.sha256 --clobber
+            gh api --method PATCH "repos/$GH_REPO/git/refs/tags/nightly" -f sha="$BUILD_SHA" -F force=true
+            gh release edit nightly --target "$BUILD_SHA" --title 'Nightly' --notes-file notes.md --prerelease --latest=false
+          else
+            echo "Unable to inspect nightly release: $status" >&2
+            exit 1
+          fi

@@ -1,3 +1,12 @@
+## GitHub Actions 与 nightly（2026-10-10）
+
+- 从干净的 main / `6ff9009` 创建 `codex/github-actions-nightly`，新增 `.github/workflows/build-nightly.yml`，并为构建脚本增加 `-Test -Headless`。不修改应用 C++ 代码；日常构建和完整界面回归入口保留。
+- 所有分支的代码/构建输入变动、面向 main 的 PR 与手动触发可构建；main 成功构建才发布固定 nightly 标签和预发布 EXE/校验文件。Actions 依赖按完整 SHA 固定；vcpkg 工具仓库与端口使用 manifest baseline。构建只读，发布 job 单独申请 contents 写权限。
+- actionlint 1.7.12 校验通过；YAML 触发条件、push/PR 路径一致性、任务依赖、权限检查通过。发布 Bash 语法及本地替代接口用例通过：创建、更新、已有标签但无 release、同提交重试、旧提交跳过、403、网络失败和校验不一致。替代接口用例未向 GitHub 写入，不能算作实际云端验收。
+- Release x64 应用及测试构建、`--no-ui` 基础回归通过（PID 73608、33300）。首次输出文件曾暂时无法覆盖，先通过独立输出目录验证，随后标准输出构建成功。验证时发现 PowerShell 单元素返回值被当作字符串逐字符展开，改为明确 string[] 后，实际 `-Test -Headless` 成功将 `--no-ui` 传给测试 EXE（PID 33300）；此前一次参数尚未修正的调用实际运行了完整窗口回归并通过（PID 74256），未将其标为无界面验证。
+- 校验文件明确使用无 BOM UTF-8 和 LF，避免 Windows CRLF 在 Linux 校验时被解释为文件名的一部分。发布前验证 SHA-256，同一 ref 串行，不自动中断上传；保留旧提交回退保护。更新现有附件使用 clobber，异常中断后可重跑对应成功构建以修复。
+- 本轮仅准备本地提交和 main 的远端推送预检，不实际 push、不创建远端标签或 Release。首次 GitHub 托管运行及真实 release 上传须在用户推送后确认。构建产物、actionlint 下载工具和本地发布用例均位于忽略的 build 目录，不提交；不生成 ZIP、不更新 dist。
+
 ## 图片编辑工作台（v1.6.0，2026-10-10）
 
 - 从干净的 `main` / `c4bd57e` 创建 `codex/editor-usability`。标注底层和编辑页分别在 Release x64 验证后提交为 `8f023e3`、`a08828b`；收尾修正、说明和验证记录作为第三阶段提交。交付为 `x64\Release\ScreenShotPlus.exe`，不打包、不更新 dist、不推送远端。

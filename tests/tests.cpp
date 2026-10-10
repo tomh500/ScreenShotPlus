@@ -470,6 +470,24 @@ void AnnotationPixels(const filesystem::path& root) {
     filesystem::path file; Check(SavePng(*result, root / L"编辑后的图片", file, error), "edited PNG saved");
     { Bitmap decoded(file.c_str()); decoded.GetPixel(50, 15, &pixel); Check(pixel.GetR() == 255 && pixel.GetG() == 0 && decoded.GetWidth() == 160, "edited PNG pixel round trip"); }
     FileTransfer(file);
+    Annotation arrow; arrow.kind = Annotation::Arrow; arrow.points = {{20,20},{100,20}}; arrow.size = 4;
+    Annotation rectangle; rectangle.kind = Annotation::Rectangle; rectangle.points = {{140,80},{110,40}}; rectangle.size = 4;
+    auto shapes = RenderAnnotations(source, {arrow, rectangle}, error);
+    Check(shapes != nullptr, "arrow and reversed rectangle rendered");
+    shapes->GetPixel(60,20,&pixel); Check(pixel.GetR()==255 && pixel.GetG()==0, "arrow shaft exported");
+    shapes->GetPixel(110,60,&pixel); Check(pixel.GetR()==255 && pixel.GetG()==0, "reversed rectangle exported");
+    Graphics measure(&source);
+    Check(HitAnnotation(measure,arrow,{60,20},2) && !HitAnnotation(measure,arrow,{60,50},2), "arrow distance hit test");
+    Check(HitAnnotation(measure,rectangle,{110,60},2) && !HitAnnotation(measure,rectangle,{125,60},2), "rectangle edge hit test");
+    Annotation mask; mask.kind=Annotation::Mosaic; mask.size=16; mask.points={{10,10},{120,40}};
+    auto masked=RenderAnnotations(source,{mask,arrow},error);
+    Check(masked != nullptr, "mosaic generated");
+    masked->GetPixel(60,20,&pixel); Check(pixel.GetR()==245 && pixel.GetG()==245, "mosaic covers later annotations using original image");
+    Bitmap grid(17,17,PixelFormat32bppARGB);
+    { Graphics g(&grid); g.Clear(Color(255,0,0,0)); SolidBrush white(Color(255,255,255,255)); g.FillRectangle(&white,0,0,8,16); }
+    auto blocks=BuildMosaic(grid,16,error);
+    Check(blocks && blocks->GetWidth()==2 && blocks->GetHeight()==2,"mosaic partial edge block dimensions");
+    blocks->GetPixel(0,0,&pixel); Check(pixel.GetR()==127 && pixel.GetA()==255,"mosaic averages original block pixels");
 }
 void Configuration(const filesystem::path& root) {
     const auto file = root / L"设置" / L"config.json";

@@ -22,12 +22,14 @@ const RectF closeButton{452, 16, 28, 28}, folderButton{24, 180, 452, 44},
     saveButton{24, 746, 218, 44}, cancelButton{254, 746, 222, 44},
     startupMotionButton{24, 486, 452, 44}, captureMotionButton{24, 544, 452, 44},
     dragMotionButton{24, 602, 452, 44}, guidesButton{24, 340, 452, 44}, shadeSliderHit{44, 222, 412, 52};
-constexpr array<const wchar_t*, 4> tabNames{L"常规", L"动效", L"外观", L"截图"};
+constexpr array<const wchar_t*, 5> tabNames{L"常规", L"动效", L"外观", L"截图", L"交互"};
+const array<RectF, 4> interactionButtons{{{24, 166, 452, 44}, {24, 278, 452, 44},
+    {24, 390, 452, 44}, {24, 502, 452, 44}}};
 double Now() { return GetTickCount64() / 1000.0; }
 void Touch() {
     if (settings.window) ui::MotionRegion(settings.window, nullptr);
 }
-RectF Tab(unsigned index) { return {24 + 116.0f * index, 76, index == 3 ? 104.0f : 108.0f, 32}; }
+RectF Tab(unsigned index) { return {24 + 90.4f * index, 76, 90.4f, 32}; }
 RectF Choice(unsigned index, unsigned count, float y) {
     const float width = (452.0f - (count - 1) * 8) / count;
     return {24 + (width + 8) * index, y, width, 40};
@@ -183,6 +185,24 @@ void DrawScreenshot(Graphics& g, HWND hwnd) {
     CenterText(g, L"截图外观预览", {139, 503, 222, 30}, 14, ui::foreground, true); g.Restore(state);
     ui::Text(g, L"背景暗度与辅助线仅改变界面，原始截图像素保持完整。", {24, 661, 452, 28}, 11, ui::muted);
 }
+void DrawInteraction(Graphics& g, HWND hwnd) {
+    ui::Text(g, L"按你的习惯，调整图片预览与分享。", {24, 124, 452, 22}, 12, ui::muted);
+    const array<bool, 4> values{settings.working.rightClickLocation, settings.working.previewFilename,
+        settings.working.previewHints, settings.working.hideAfterDrag};
+    constexpr array<const wchar_t*, 4> titles{L"右键图片打开所在位置", L"显示图片文件名", L"显示图片操作提示", L"分享成功后收起缩略图"};
+    constexpr array<const wchar_t*, 4> descriptions{
+        L"右键缩略图中的图片，在资源管理器中选中该 PNG。",
+        L"在缩略图底部显示已保存图片的文件名。",
+        L"显示单击编辑、拖动分享与右键定位的提示。",
+        L"接收程序确认复制后自动收起；取消或失败时保留。"};
+    for (unsigned i = 0; i < interactionButtons.size(); ++i) {
+        const auto rect = interactionButtons[i];
+        ui::Toggle(g, hwnd, rect, titles[i], values[i], ui::Inside(settings.mouse, rect));
+        ui::Text(g, descriptions[i], {24, rect.Y + 54, 452, 40}, 11.5f, ui::muted);
+    }
+    ui::Round(g, {24, 614, 452, 72}, 12, ui::surface);
+    ui::Text(g, L"保存后应用于预览。收起缩略图始终保留原文件，\n可从操作面板再次显示最新截图。", {40, 628, 420, 44}, 12, ui::muted);
+}
 void DrawSettings(HWND hwnd, HDC target = nullptr) {
     ui::Paint paint(hwnd, target); Graphics g(paint.buffer);
     const double now = Now(); const RECT region = SelectorRegion(hwnd);
@@ -208,15 +228,16 @@ void DrawSettings(HWND hwnd, HDC target = nullptr) {
     ui::Button(g, hwnd, closeButton, L"×", false, ui::Inside(settings.mouse, closeButton));
     ui::Round(g, {24, 76, 452, 32}, 9, Color(255, 31, 37, 46));
     const float tab = ui::AnimateValue(hwnd, 6200, static_cast<float>(settings.tab), .18, static_cast<float>(settings.tab));
-    ui::Round(g, {25 + 116 * tab, 77, 106 - 4 * max(0.0f, tab - 2), 30}, 8, Color(255, 56, 66, 79));
-    for (unsigned i = 0; i < 4; ++i) CenterText(g, tabNames[i], Tab(i), 13, settings.tab == i ? ui::accent : ui::muted, settings.tab == i);
+    ui::Round(g, {25 + 90.4f * tab, 77, 88.4f, 30}, 8, Color(255, 56, 66, 79));
+    for (unsigned i = 0; i < tabNames.size(); ++i) CenterText(g, tabNames[i], Tab(i), 13, settings.tab == i ? ui::accent : ui::muted, settings.tab == i);
     const float reveal = settings.pageReveal.Value(now);
     const auto state = g.Save(); g.TranslateTransform(0, (1 - reveal) * 7 * ui::MotionAmount());
     bool continuous = settings.pageReveal.Active(now);
     if (settings.tab == 0) DrawGeneral(g, hwnd);
     else if (settings.tab == 1) continuous = DrawMotion(g, hwnd) || continuous;
     else if (settings.tab == 2) DrawAppearance(g, hwnd);
-    else DrawScreenshot(g, hwnd);
+    else if (settings.tab == 3) DrawScreenshot(g, hwnd);
+    else DrawInteraction(g, hwnd);
     g.Restore(state);
     ui::Text(g, settings.notice, {24, 702, 452, 36}, 11.5f, ui::danger);
     Pen divider(Color(255, 58, 68, 82), 1); g.DrawLine(&divider, 24.0f, 736.0f, 476.0f, 736.0f);
@@ -235,7 +256,7 @@ void HandleClick(POINT down, POINT p) {
         }
         return;
     }
-    for (unsigned i = 0; i < 4; ++i) if (hit(Tab(i))) { SwitchTab(i); return; }
+    for (unsigned i = 0; i < tabNames.size(); ++i) if (hit(Tab(i))) { SwitchTab(i); return; }
     settings.focused = 0;
     if (settings.tab == 0) {
         if (hit(folderButton)) { settings.listening = false; ui::PickFolder(settings.window, settings.working.folder); }
@@ -256,7 +277,13 @@ void HandleClick(POINT down, POINT p) {
         for (unsigned i = 0; i < 5; ++i) if (hit({34 + 90.0f * i, 175, 72, 89})) { settings.working.accentColor = i; LivePreview(); }
         for (unsigned i = 0; i < 4; ++i) if (hit(Choice(i % 2, 2, i < 2 ? 468.0f : 516.0f))) settings.working.previewCorner = i;
         for (unsigned i = 0; i < 3; ++i) if (hit(Choice(i, 3, 607))) settings.working.previewSize = i;
-    } else if (hit(guidesButton)) settings.working.captureGuides = !settings.working.captureGuides;
+    } else if (settings.tab == 3) {
+        if (hit(guidesButton)) settings.working.captureGuides = !settings.working.captureGuides;
+    } else if (settings.tab == 4) {
+        const array<bool*, 4> values{&settings.working.rightClickLocation, &settings.working.previewFilename,
+            &settings.working.previewHints, &settings.working.hideAfterDrag};
+        for (unsigned i = 0; i < values.size(); ++i) if (hit(interactionButtons[i])) *values[i] = !*values[i];
+    }
 }
 LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     if (ui::MotionMessage(hwnd, msg, wparam, lparam)) return 0;
@@ -319,7 +346,7 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
                 settings.working = candidate; settings.listening = false; settings.notice.clear(); InvalidateRect(hwnd, nullptr, FALSE);
             }
         } else if (wparam == VK_TAB) {
-            const bool reverse = (GetKeyState(VK_SHIFT) & 0x8000) != 0; SwitchTab((settings.tab + (reverse ? 3 : 1)) % 4);
+            const bool reverse = (GetKeyState(VK_SHIFT) & 0x8000) != 0; SwitchTab((settings.tab + (reverse ? 4 : 1)) % 5);
         } else if (settings.tab == 1 && settings.focused == 1) {
             unsigned level = settings.working.animationLevel;
             if (wparam == VK_LEFT || wparam == VK_DOWN) level = level ? level - 1 : 0;

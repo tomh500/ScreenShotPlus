@@ -49,7 +49,7 @@ float Ease(float p) { p = clamp(p, 0.0f, 1.0f); return 1 - pow(1 - p, 3.0f); }
 void ConfigureUi() {
     ui::SetMotionOptions(app.config.animationLevel, app.config.animationSpeed); ui::SetAccent(app.config.accentColor);
     ConfigureCapture(app.config.captureShade, app.config.captureGuides, app.config.captureAnimation);
-    ConfigurePreview(app.config.previewCorner, app.config.previewSize, app.config.captureAnimation, app.config.dragAnimation);
+    ConfigurePreview(app.config);
 }
 void EndLaunch() {
     app.launching = false;
@@ -129,6 +129,11 @@ void EditLatest() {
     ShowWindow(app.panel, SW_HIDE); HidePreview();
     wstring error;
     if (!ShowEditor(*app.latest, error)) { app.phase = App::Idle; LatestPreview(); Notice(error); }
+}
+void LocateLatest() {
+    if (app.phase != App::Idle || !app.latest || SettingsVisible() || app.exiting) return;
+    wstring error;
+    if (!ui::RevealFile(app.latestFile, error)) Notice(error);
 }
 bool SaveEdited(unique_ptr<Bitmap>& image, wstring& error) {
     if (app.exiting || app.phase != App::Editing || !image) return false;
@@ -302,7 +307,7 @@ int RunApp(HINSTANCE instance, const filesystem::path& configFile, bool trayStar
     if (!app.panel) return 5;
     if (app.launching) SetPropW(app.panel, L"ScreenShotPlus.StartupAnimating", reinterpret_cast<HANDLE>(1));
     if (configFile.empty()) SetPropW(app.panel, INSTANCE_PANEL_MARKER, reinterpret_cast<HANDLE>(1));
-    if (!InitPreview(instance, DragLatest, EditLatest) || !InitSettings(instance, app.panel, ApplyConfig) ||
+    if (!InitPreview(instance, DragLatest, EditLatest, LocateLatest) || !InitSettings(instance, app.panel, ApplyConfig) ||
         !InitEditor(instance, app.panel, SaveEdited, CancelEdit)) {
         DestroyWindow(app.panel); return 7;
     }

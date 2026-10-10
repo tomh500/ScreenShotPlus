@@ -477,10 +477,11 @@ void Configuration(const filesystem::path& root) {
     c.modifiers = MOD_CONTROL | MOD_ALT; c.key = VK_F9; c.printScreen = true; c.previewSeconds = 15; c.startup = true;
     Check(c.animationLevel == 3 && c.animationSpeed == 1 && c.accentColor == 0 && c.previewCorner == 0 &&
         c.previewSize == 1 && c.captureShade == 60 && c.captureAnimation && c.dragAnimation &&
-        c.startupAnimation && c.captureGuides, "new customization defaults preserve existing behavior");
+        c.startupAnimation && c.captureGuides && c.rightClickLocation && c.previewFilename && c.previewHints && !c.hideAfterDrag, "new customization defaults preserve existing behavior");
     c.animationLevel = 4; c.animationSpeed = 2; c.accentColor = 3; c.previewCorner = 2;
     c.previewSize = 0; c.captureShade = 75;
     c.captureAnimation = false; c.dragAnimation = false; c.startupAnimation = false; c.captureGuides = false;
+    c.rightClickLocation = false; c.previewFilename = false; c.previewHints = false; c.hideAfterDrag = true;
     wstring error;
     Check(SaveConfig(file, c, error), "save config");
     wstring warning;
@@ -488,7 +489,8 @@ void Configuration(const filesystem::path& root) {
     Check(warning.empty() && loaded.folder == c.folder && loaded.key == VK_F9 && loaded.previewSeconds == 15 && loaded.printScreen && loaded.startup, "Unicode config round trip");
     Check(loaded.animationLevel == 4 && loaded.animationSpeed == 2 && loaded.accentColor == 3 &&
         loaded.previewCorner == 2 && loaded.previewSize == 0 && loaded.captureShade == 75 &&
-        !loaded.captureAnimation && !loaded.dragAnimation && !loaded.startupAnimation && !loaded.captureGuides,
+        !loaded.captureAnimation && !loaded.dragAnimation && !loaded.startupAnimation && !loaded.captureGuides &&
+        !loaded.rightClickLocation && !loaded.previewFilename && !loaded.previewHints && loaded.hideAfterDrag,
         "animation, color, preview and capture preferences persist");
     c.previewSeconds = 0; Check(SaveConfig(file, c, error), "replace existing config atomically");
     Check(LoadConfig(file, warning).previewSeconds == 0, "updated config persisted");
@@ -496,12 +498,14 @@ void Configuration(const filesystem::path& root) {
     { ifstream in(file); in >> data; }
     auto legacy = data;
     for (const auto* key : {"startup", "animationLevel", "animationSpeed", "accentColor", "previewCorner", "previewSize",
-        "captureShade", "captureAnimation", "dragAnimation", "startupAnimation", "captureGuides"}) legacy.erase(key);
+        "captureShade", "captureAnimation", "dragAnimation", "startupAnimation", "captureGuides",
+        "rightClickLocation", "previewFilename", "previewHints", "hideAfterDrag"}) legacy.erase(key);
     { ofstream out(file); out << legacy; }
     warning.clear(); loaded = LoadConfig(file, warning);
     Check(!loaded.startup && warning.empty() && loaded.animationLevel == 3 && loaded.animationSpeed == 1 &&
         loaded.accentColor == 0 && loaded.previewCorner == 0 && loaded.previewSize == 1 && loaded.captureShade == 60 &&
-        loaded.captureAnimation && loaded.dragAnimation && loaded.startupAnimation && loaded.captureGuides,
+        loaded.captureAnimation && loaded.dragAnimation && loaded.startupAnimation && loaded.captureGuides &&
+        loaded.rightClickLocation && loaded.previewFilename && loaded.previewHints && !loaded.hideAfterDrag,
         "legacy config loads safe customization defaults without migration");
     { auto explicitPreset = legacy; explicitPreset["animationLevel"] = 2; ofstream out(file); out << explicitPreset; }
     warning.clear(); loaded = LoadConfig(file, warning);
@@ -531,7 +535,8 @@ void Configuration(const filesystem::path& root) {
     { auto invalid = data; invalid["captureShade"] = 24; ofstream out(file); out << invalid; }
     warning.clear(); loaded = LoadConfig(file, warning);
     Check(!warning.empty() && loaded.captureShade == 60, "capture shade lower bound validated");
-    for (const auto* key : {"captureAnimation", "dragAnimation", "startupAnimation", "captureGuides"}) {
+    for (const auto* key : {"captureAnimation", "dragAnimation", "startupAnimation", "captureGuides",
+        "rightClickLocation", "previewFilename", "previewHints", "hideAfterDrag"}) {
         auto invalid = data; invalid[key] = 1;
         { ofstream out(file); out << invalid; }
         warning.clear(); loaded = LoadConfig(file, warning);
@@ -712,6 +717,51 @@ void SettingsFailureUi(HINSTANCE instance, const filesystem::path& root) {
     Check(SettingsVisible(), "save failure keeps settings available");
     Snapshot(hwnd, root / L"settings-error-ui"); DestroySettings();
 }
+void PersonalizationUi(HINSTANCE instance, const filesystem::path& root) {
+    Config config = DefaultConfig(); config.folder = root / L"personalization-images";
+    Config saved = config;
+    Check(InitSettings(instance, nullptr, [&](const Config& next, wstring&) { saved = next; return true; }), "initialize interaction settings");
+    ShowSettings(config); HWND settings = OwnWindow(L"ScreenShotPlus.Settings");
+    Click(settings, 430, 92);
+    Check(GetSettingsState().tab == 4, "fifth interaction tab accessible");
+    Snapshot(settings, root / L"settings-interaction-default-ui");
+    for (int y : {188, 300, 412, 524}) Click(settings, 250, y);
+    auto working = GetSettingsState().working;
+    Check(!working.rightClickLocation && !working.previewFilename && !working.previewHints && working.hideAfterDrag, "four interaction switches independently change draft");
+    Click(settings, 350, 768); ShowSettings(config); Click(settings, 430, 92);
+    Check(GetSettingsState().working.rightClickLocation && !GetSettingsState().working.hideAfterDrag, "cancel discards interaction draft");
+    for (int y : {188, 300, 412, 524}) Click(settings, 250, y);
+    Snapshot(settings, root / L"settings-interaction-custom-ui");
+    Click(settings, 100, 768);
+    Check(!SettingsVisible() && !saved.rightClickLocation && !saved.previewFilename && !saved.previewHints && saved.hideAfterDrag, "save applies interaction options");
+    ShowSettings(saved); Click(settings, 430, 92); SendMessageW(settings, WM_KEYDOWN, VK_TAB, 0);
+    Check(GetSettingsState().tab == 0, "keyboard tab wraps from interaction page");
+    HideSettings(); DestroySettings();
+
+    Bitmap image(96, 64, PixelFormat32bppARGB); Graphics graphics(&image); graphics.Clear(Color(255, 45, 105, 150));
+    filesystem::path file; wstring error;
+    Check(SavePng(image, config.folder, file, error), "create real image fixture");
+    unsigned located = 0, edited = 0;
+    Check(InitPreview(instance, [] {}, [&] { ++edited; }, [&] { ++located; }), "initialize preview interaction callbacks");
+    ConfigurePreview(config); ShowPreview(&image, file, {300, 300}); HWND preview = OwnWindow(L"ScreenShotPlus.Preview");
+    Snapshot(preview, root / L"preview-interaction-default-ui");
+    Pointer(preview, WM_RBUTTONUP, 100, 100);
+    Check(located == 1 && edited == 0, "enabled image right click routes only to locate action");
+    Pointer(preview, WM_RBUTTONUP, 100, 250);
+    Check(located == 1, "right click outside image does not locate");
+    ConfigurePreview(saved); ShowPreview(&image, file, {300, 300});
+    Snapshot(preview, root / L"preview-interaction-minimal-ui");
+    Pointer(preview, WM_RBUTTONUP, 100, 100); Check(located == 1, "disabled right click does not locate");
+    Click(preview, 100, 100); Check(edited == 1, "left click editor works with hints hidden");
+    PreviewDragResult(false); Check(PreviewVisible(), "cancelled drag keeps preview");
+    PreviewDragResult(true); Check(!PreviewVisible() && filesystem::exists(file), "successful drag hides preview and preserves file");
+    ConfigurePreview(config); ShowPreview(&image, file, {300, 300}); PreviewDragResult(true);
+    Check(PreviewVisible(), "default successful drag keeps preview");
+    DestroyPreview();
+    Check(!ui::RevealFile(root / L"missing-image.png", error) && !error.empty(), "missing image produces locate error without creating paths");
+    Check(!ui::RevealFile(config.folder, error), "locate rejects directory");
+    cout << "PASS personalization draft / cancel / save / keyboard / right click routing / drag outcomes / missing file (isolated window messages, not Explorer acceptance)\n";
+}
 void SettingsMotionUi(HINSTANCE instance, const filesystem::path& root) {
     struct RestoreOptions {
         ~RestoreOptions() { DestroySettings(); ui::SetMotionOptions(2, 1); ui::SetAccent(0); }
@@ -726,7 +776,7 @@ void SettingsMotionUi(HINSTANCE instance, const filesystem::path& root) {
     SetSettingsConfigFile(file); ShowSettings(initial);
     HWND hwnd = OwnWindow(L"ScreenShotPlus.Settings"); Check(hwnd && SettingsVisible(), "settings fixture visible");
     UpdateWindow(hwnd); Pump(350);
-    Click(hwnd, 190, 92); UpdateWindow(hwnd); Pump(260);
+    Click(hwnd, 160, 92); UpdateWindow(hwnd); Pump(260);
     Check(GetSettingsState().tab == 1 && GetSettingsState().title == L"高", "motion tab begins at persisted high tier");
     Click(hwnd, 62, 289); UpdateWindow(hwnd);
     Check(GetSettingsState().working.animationLevel == 0 && ui::MotionLevel() == 0 && !ui::GetMotionInfo(hwnd).enabled,
@@ -782,7 +832,7 @@ void SettingsMotionUi(HINSTANCE instance, const filesystem::path& root) {
     Check(GetSettingsState().working.animationLevel == 3 && GetSettingsState().title == L"极高", "keyboard reversal cancels signature transition");
     Pointer(hwnd, WM_LBUTTONDOWN, 250, 289, MK_LBUTTON); ReleaseCapture();
     Check(!GetSettingsState().sliderDragging && GetSettingsState().working.animationLevel == 2, "lost pointer capture cancels scrub state cleanly");
-    Click(hwnd, 438, 289); Click(hwnd, 306, 92); Click(hwnd, 340, 211);
+    Click(hwnd, 438, 289); Click(hwnd, 250, 92); Click(hwnd, 340, 211);
     Check(ui::MotionLevel() == 4 && ui::accent.GetValue() == ui::AccentColor(3).GetValue(), "settings provides live motion and accent preview");
     Pump(700); Check(!ui::GetMotionInfo(hwnd).running, "leaving ultimate motion page stops its star loop");
     Click(hwnd, 350, 768);
@@ -791,10 +841,10 @@ void SettingsMotionUi(HINSTANCE instance, const filesystem::path& root) {
     warning.clear(); Check(applied == 0 && LoadConfig(file, warning).animationLevel == 2 && warning.empty(), "cancel preserves persisted configuration");
     const auto hiddenFrames = ui::GetMotionInfo(hwnd).frames; Pump(90);
     Check(!ui::GetMotionInfo(hwnd).running && ui::GetMotionInfo(hwnd).frames == hiddenFrames, "hidden ultimate settings has no scheduled frames");
-    ShowSettings(initial); Click(hwnd, 190, 92); Click(hwnd, 438, 289);
+    ShowSettings(initial); Click(hwnd, 160, 92); Click(hwnd, 438, 289);
     Click(hwnd, 96, 448); Click(hwnd, 250, 508); Click(hwnd, 250, 566); Click(hwnd, 250, 624);
-    Click(hwnd, 306, 92); Click(hwnd, 430, 211); Click(hwnd, 365, 536); Click(hwnd, 403, 627);
-    Click(hwnd, 412, 92); Pointer(hwnd, WM_LBUTTONDOWN, 62, 243, MK_LBUTTON);
+    Click(hwnd, 250, 92); Click(hwnd, 430, 211); Click(hwnd, 365, 536); Click(hwnd, 403, 627);
+    Click(hwnd, 340, 92); Pointer(hwnd, WM_LBUTTONDOWN, 62, 243, MK_LBUTTON);
     Pointer(hwnd, WM_MOUSEMOVE, 438, 243, MK_LBUTTON); Pointer(hwnd, WM_LBUTTONUP, 438, 243);
     SendMessageW(hwnd, WM_KEYDOWN, VK_HOME, 0); Check(GetSettingsState().working.captureShade == 25, "shade keyboard Home reaches lightest background");
     SendMessageW(hwnd, WM_KEYDOWN, VK_END, 0); Click(hwnd, 250, 362);
@@ -805,15 +855,15 @@ void SettingsMotionUi(HINSTANCE instance, const filesystem::path& root) {
         !saved.startupAnimation && !saved.captureAnimation && !saved.dragAnimation && !saved.captureGuides,
         "native settings saves all custom controls and independent animation switches");
     Check(ui::MotionLevel() == 4 && ui::accent.GetValue() == ui::AccentColor(4).GetValue(), "save keeps chosen live style as rollback baseline");
-    ShowSettings(saved); Click(hwnd, 190, 92);
+    ShowSettings(saved); Click(hwnd, 160, 92);
     Check(GetSettingsState().title == L"终极", "reopening persisted ultimate skips an artificial signature replay");
-    Click(hwnd, 62, 289); Click(hwnd, 306, 92); Click(hwnd, 70, 211); SendMessageW(hwnd, WM_KEYDOWN, VK_ESCAPE, 0);
+    Click(hwnd, 62, 289); Click(hwnd, 250, 92); Click(hwnd, 70, 211); SendMessageW(hwnd, WM_KEYDOWN, VK_ESCAPE, 0);
     Check(!SettingsVisible() && ui::MotionLevel() == 4 && ui::accent.GetValue() == ui::AccentColor(4).GetValue(),
         "Escape restores most recently saved preview baseline");
     DestroySettings(); Pump(40); const DWORD resources = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
     for (unsigned repeat = 0; repeat < 3; ++repeat) {
         Check(InitSettings(instance, nullptr, [](const Config&, wstring&) { return true; }), "recreate settings animation fixture");
-        ShowSettings(saved); HWND next = OwnWindow(L"ScreenShotPlus.Settings"); Click(next, 190, 92); UpdateWindow(next); Pump(80);
+        ShowSettings(saved); HWND next = OwnWindow(L"ScreenShotPlus.Settings"); Click(next, 160, 92); UpdateWindow(next); Pump(80);
         Check(ui::GetMotionInfo(next).running, "recreated ultimate selector animates");
         SendMessageW(next, WM_CLOSE, 0, 0); const auto stoppedFrames = ui::GetMotionInfo(next).frames; Pump(60);
         Check(!ui::GetMotionInfo(next).running && ui::GetMotionInfo(next).frames == stoppedFrames, "closing settings cancels ultimate frame loop");
@@ -1172,6 +1222,8 @@ bool AppSmoke(HINSTANCE instance, const filesystem::path& artifacts, bool isolat
     if (created == ERROR_ALREADY_EXISTS) { CloseHandle(mutex); return false; }
     const auto file = artifacts / L"app-config" / L"config.json";
     Config initial = DefaultConfig(); initial.folder = artifacts / L"app-screens";
+    // StartupUi checks the launch scene separately; this fixture clicks the working panel.
+    initial.startupAnimation = false;
     if (isolated) { initial.modifiers = MOD_CONTROL | MOD_ALT | MOD_SHIFT; initial.key = VK_F20; }
     wstring error; Check(SaveConfig(file, initial, error), "isolated application config");
     const DWORD uiThread = GetCurrentThreadId(); atomic<bool> ok = false;
@@ -1458,6 +1510,8 @@ int wmain(int argc, wchar_t** argv) {
         return waited == WAIT_OBJECT_0 ? 71 : 93;
     }
     const bool isolatedUi = argc > 1 && wstring_view(argv[1]) == L"--isolated-ui";
+    const bool appOnly = argc > 1 && wstring_view(argv[1]) == L"--app-ui";
+    const bool personalizationOnly = argc > 1 && wstring_view(argv[1]) == L"--personalization-ui";
     const bool animationOnly = argc > 1 && wstring_view(argv[1]) == L"--animation-ui";
     bool liveUi = !(argc > 1 && wstring_view(argv[1]) == L"--no-ui");
     HANDLE running = OpenMutexW(SYNCHRONIZE, FALSE, L"Local\\ScreenShotPlus.Singleton");
@@ -1470,16 +1524,24 @@ int wmain(int argc, wchar_t** argv) {
     int code = 0;
     try {
         filesystem::create_directories(root);
+        if (appOnly) {
+            WNDCLASSEXW cls{sizeof(cls)}; cls.hInstance = GetModuleHandleW(nullptr); cls.lpfnWndProc = PatternProc;
+            cls.lpszClassName = L"ScreenShotPlus.TestPattern"; Check(RegisterClassExW(&cls) != 0, "register app capture fixture");
+            Check(AppSmoke(GetModuleHandleW(nullptr), root), "standalone application workflow");
+            cout << "PASS application workflow with launch animation tested separately\n";
+        }
+        if (personalizationOnly) { Configuration(root); PersonalizationUi(GetModuleHandleW(nullptr), root); }
         AnimationTiming(); cout << "PASS fractional refresh / 120 fallback / interrupted curves / time-based duration / five motion tiers / speeds / reduced motion\n";
         LaunchTiming(); cout << "PASS exact launch quotes / initialization readiness / ordered phases / adaptive time-based clocks / readable durations\n";
-        if (liveUi) {
+        if (liveUi && !personalizationOnly && !appOnly) {
             AnimationUi(GetModuleHandleW(nullptr), root); cout << "PASS animation frames / hover / toggle / press / idle / hide / reopen / GDI lifetime\n";
             RichEffectsUi(GetModuleHandleW(nullptr), root); cout << "PASS layered flight / drag card / copy feedback / cancel return / accepted drop / input transparency / resource lifetime (visual fixture, not client acceptance)\n";
             CustomizationUi(GetModuleHandleW(nullptr), root); cout << "PASS capture customization / original pixels / entrance off / preview corner and size / physical DPI / restrained tiers (isolated native UI fixture)\n";
             SettingsMotionUi(GetModuleHandleW(nullptr), root); cout << "PASS native five-stop selector / light-tier forced animation / signature and final label / scrub and keyboard / style rollback and persistence / hidden idle and GDI lifetime\n";
+            PersonalizationUi(GetModuleHandleW(nullptr), root);
             StartupUi(filesystem::absolute(argv[0]), root); cout << "PASS persisted extreme and ultimate startup / poem to voyage / readable duration / interruption / disabled and lower-tier suppression / silent tray startup / normal shutdown (isolated child application fixture)\n";
         }
-        if (!animationOnly) {
+        if (!animationOnly && !personalizationOnly && !appOnly) {
         Geometry(); cout << "PASS selection geometry\n";
         InstanceProcesses(filesystem::absolute(argv[0])); cout << "PASS 8 concurrent processes / single-instance mutex / restart\n";
         InstanceActivation(GetModuleHandleW(nullptr)); cout << "PASS delayed primary window / duplicate activation\n";

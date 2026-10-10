@@ -80,6 +80,10 @@ Config LoadConfig(const filesystem::path& file, wstring& warning) {
         parsed.dragAnimation = data.value("dragAnimation", true);
         parsed.startupAnimation = data.value("startupAnimation", true);
         parsed.captureGuides = data.value("captureGuides", true);
+        parsed.rightClickLocation = data.value("rightClickLocation", true);
+        parsed.previewFilename = data.value("previewFilename", true);
+        parsed.previewHints = data.value("previewHints", true);
+        parsed.hideAfterDrag = data.value("hideAfterDrag", false);
         if (!ValidConfig(parsed)) throw runtime_error("invalid config");
         result = move(parsed);
     } catch (const exception&) { warning = L"配置损坏或无效，已使用默认设置；原文件保留到下次保存设置。"; }
@@ -107,7 +111,9 @@ bool SaveConfig(const filesystem::path& file, const Config& c, wstring& error) {
             {"animationLevel", c.animationLevel}, {"animationSpeed", c.animationSpeed}, {"accentColor", c.accentColor},
             {"previewCorner", c.previewCorner}, {"previewSize", c.previewSize}, {"captureShade", c.captureShade},
             {"captureAnimation", c.captureAnimation}, {"dragAnimation", c.dragAnimation},
-            {"startupAnimation", c.startupAnimation}, {"captureGuides", c.captureGuides}};
+            {"startupAnimation", c.startupAnimation}, {"captureGuides", c.captureGuides},
+            {"rightClickLocation", c.rightClickLocation}, {"previewFilename", c.previewFilename},
+            {"previewHints", c.previewHints}, {"hideAfterDrag", c.hideAfterDrag}};
         ofstream output(temporary, ios::binary | ios::trunc);
         if (!output) return failed(L"创建临时配置", error_code(errno ? errno : EIO, generic_category()));
         created = true;

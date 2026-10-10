@@ -216,6 +216,53 @@ void LaunchTiming() {
     }
     ui::SetMotionOptions(2, 1);
 }
+void LaunchPixels(const filesystem::path& root) {
+    const Color previous = ui::accent;
+    const DWORD resources = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+    set<ARGB> badges, exits;
+    constexpr array<const wchar_t*, 5> names{L"mint", L"blue", L"purple", L"rose", L"gold"};
+    for (unsigned theme = 0; theme < names.size(); ++theme) {
+        ui::SetAccent(theme);
+        Bitmap image(420, 570, PixelFormat32bppARGB);
+        {
+            Graphics g(&image); g.SetSmoothingMode(SmoothingModeAntiAlias);
+            auto frame = LaunchScene(.67f, true); DrawLaunchScene(g, frame, 4);
+        }
+        Color pixel; Check(image.GetPixel(190, 190, &pixel) == Ok, "read ultimate themed badge");
+        badges.insert(pixel.GetValue());
+        const Color accent = ui::accent;
+        const auto order = [](BYTE a, BYTE b) { return a > b ? 1 : a < b ? -1 : 0; };
+        Check(order(pixel.GetR(), pixel.GetG()) == order(accent.GetR(), accent.GetG()) &&
+            order(pixel.GetG(), pixel.GetB()) == order(accent.GetG(), accent.GetB()),
+            "ultimate badge preserves the selected theme channel order instead of fixed purple");
+        filesystem::path file; wstring error;
+        Check(SavePng(image, root / (wstring(L"ultimate-") + names[theme]), file, error), "save all five ultimate theme frames");
+        {
+            Graphics g(&image); auto frame = LaunchScene(.67f, true); frame.secret = true;
+            DrawLaunchScene(g, frame, 4);
+        }
+        Check(SavePng(image, root / (wstring(L"secret-") + names[theme]), file, error), "save secret constellation frame");
+        Color before; image.GetPixel(10, 400, &before);
+        {
+            Graphics g(&image); DrawExitScene(g, 0, false);
+        }
+        image.GetPixel(10, 400, &pixel);
+        Check(pixel.GetValue() == before.GetValue(), "exit begins with the existing panel pixels rather than a black flash");
+        {
+            Graphics g(&image); DrawExitScene(g, .32f, true);
+        }
+        Check(image.GetPixel(210, 190, &pixel) == Ok, "read themed departure glow"); exits.insert(pixel.GetValue());
+        Check(SavePng(image, root / (wstring(L"exit-") + names[theme]), file, error), "save themed exit frame");
+        {
+            Graphics g(&image); DrawExitScene(g, 1, false);
+        }
+        Check(image.GetPixel(210, 223, &pixel) == Ok && pixel.GetValue() == Color(255, 16, 21, 32).GetValue(),
+            "exit particles and glow end at a clean exact endpoint");
+    }
+    Check(badges.size() == 5 && exits.size() == 5, "every startup and exit theme has a distinct rendered palette");
+    ui::accent = previous;
+    Check(GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) <= resources + 2, "themed scene renders release GDI resources");
+}
 struct MotionFixture { bool hovered = false, enabled = false; };
 LRESULT CALLBACK MotionFixtureProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     if (ui::MotionMessage(hwnd, message, wparam, lparam)) return 0;
@@ -1438,6 +1485,72 @@ void ExecutableSmoke(const filesystem::path& executable) {
     Check(WaitForSingleObject(first.hProcess, 5000) == WAIT_OBJECT_0, "actual EXE shuts down gracefully");
     cout << "PASS actual EXE startup / duplicate manual and tray launch / graceful shutdown\n";
 }
+void UltimateUi(const filesystem::path& executable, const filesystem::path& root) {
+    ui::SetMotionOptions(4, 1); const bool motion = ui::DecorativeMotion(4); ui::SetMotionOptions(2, 1);
+    for (unsigned theme = 0; theme < 6; ++theme) {
+        Config config = DefaultConfig(); config.folder = root / L"ultimate-fixture-images";
+        config.modifiers = MOD_CONTROL | MOD_ALT | MOD_SHIFT; config.key = VK_F19;
+        config.animationLevel = theme == 5 ? 3 : 4; config.accentColor = theme % 5; config.startupAnimation = false;
+        const auto file = root / (L"ultimate-fixture-" + to_wstring(theme)) / L"config.json";
+        wstring error; Check(SaveConfig(file, config, error), "persist independent ultimate theme config");
+        STARTUPINFOW startup{sizeof(startup)}; PROCESS_INFORMATION child{};
+        wstring command = L"\"" + executable.wstring() + L"\" --startup-fixture \"" + file.wstring() + L"\"";
+        Check(CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup, &child), "launch ultimate child app");
+        struct Cleanup {
+            PROCESS_INFORMATION child;
+            ~Cleanup() {
+                if (WaitForSingleObject(child.hProcess, 0) == WAIT_TIMEOUT) PostThreadMessageW(child.dwThreadId, WM_QUIT, 0, 0);
+                if (WaitForSingleObject(child.hProcess, 5000) != WAIT_OBJECT_0) TerminateProcess(child.hProcess, 96);
+                CloseHandle(child.hThread); CloseHandle(child.hProcess);
+            }
+        } cleanup{child};
+        HWND panel = nullptr;
+        const auto deadline = GetTickCount64() + 5000;
+        while (!panel && GetTickCount64() < deadline) {
+            struct Search { DWORD pid; HWND window = nullptr; } search{child.dwProcessId};
+            EnumWindows([](HWND hwnd, LPARAM param) -> BOOL {
+                auto& s = *reinterpret_cast<Search*>(param); DWORD pid = 0; GetWindowThreadProcessId(hwnd, &pid);
+                wchar_t name[128]{}; GetClassNameW(hwnd, name, 128);
+                if (pid == s.pid && wstring_view(name) == PANEL_CLASS && GetPropW(hwnd, L"ScreenShotPlus.Ready")) { s.window = hwnd; return FALSE; }
+                return TRUE;
+            }, reinterpret_cast<LPARAM>(&search));
+            panel = search.window; if (!panel) Pump(15);
+        }
+        Check(panel != nullptr, "ultimate fixture panel initialized");
+        for (int i = 0; i < 5; ++i) Click(panel, 44, 44);
+        if (theme < 5 && motion) {
+            Check(GetPropW(panel, L"ScreenShotPlus.SecretScene") && GetPropW(panel, L"ScreenShotPlus.StartupAnimating"), "five logo clicks reveal the secret without changing saved startup preference");
+            Pump(650); Click(panel, 210, 210); Pump(650);
+            Check(GetPropW(panel, L"ScreenShotPlus.SecretScene") && GetPropW(panel, L"ScreenShotPlus.StartupAnimating"), "secret emblem click keeps scene open instead of capturing");
+            Snapshot(panel, root / (L"ultimate-secret-native-" + to_wstring(theme)), false);
+            SendMessageW(panel, WM_KEYDOWN, VK_ESCAPE, 0); Pump(20);
+            Check(!GetPropW(panel, L"ScreenShotPlus.StartupAnimating") && !GetPropW(panel, L"ScreenShotPlus.SecretScene"), "escape clears both replay and secret visual state");
+            for (const wchar_t key : wstring_view(L"XUANRIKKA")) SendMessageW(panel, WM_KEYDOWN, key, 0);
+            Check(GetPropW(panel, L"ScreenShotPlus.SecretScene"), "hidden keyboard phrase reveals XR constellation");
+            Click(panel, 100, 198); Pump(20);
+            Check(!GetPropW(panel, L"ScreenShotPlus.StartupAnimating") && IsWindowVisible(panel), "skip on capture button does not leak click into capture");
+        } else Check(!GetPropW(panel, L"ScreenShotPlus.StartupAnimating"), "extreme and reduced motion never start ultimate secret replay");
+        if (GetPropW(panel, L"ScreenShotPlus.TrayRegistered")) {
+            SendMessageW(panel, WM_CLOSE, 0, 0); Pump(30);
+            Check(!IsWindowVisible(panel) && WaitForSingleObject(child.hProcess, 0) == WAIT_TIMEOUT && !GetPropW(panel, L"ScreenShotPlus.ExitAnimating"), "close panel remains tray hide rather than application exit");
+            SendMessageW(panel, WM_SHOW_PANEL, 0, 0); Pump(50);
+        }
+        Click(panel, 200, 424);
+        if (theme < 5 && motion) {
+            Check(GetPropW(panel, L"ScreenShotPlus.ExitAnimating") && WaitForSingleObject(child.hProcess, 0) == WAIT_TIMEOUT, "explicit exit starts the themed farewell");
+            SendMessageW(panel, WM_SHOW_PANEL, 0, 0); SendMessageW(panel, WM_HOTKEY, 1, 0);
+            Pump(300); Snapshot(panel, root / (L"ultimate-exit-native-" + to_wstring(theme)), false);
+            if (theme == 0) SendMessageW(panel, WM_KEYDOWN, VK_ESCAPE, 0);
+            else if (theme == 1) Click(panel, 210, 210);
+            else if (theme == 2) ShowWindow(panel, SW_HIDE); // Exit clock survives hidden/no-paint windows.
+        }
+        Check(WaitForSingleObject(child.hProcess, 3000) == WAIT_OBJECT_0, "exit finishes and releases the child process even with no paint or interruption");
+        DWORD code = 1; GetExitCodeProcess(child.hProcess, &code); Check(code == 0, "ultimate child exits cleanly");
+        const auto persisted = LoadConfig(file, error);
+        Check(persisted.animationLevel == config.animationLevel && persisted.accentColor == config.accentColor && !persisted.startupAnimation, "secret interactions do not rewrite saved config");
+        cout << "PASS ultimate native theme=" << theme << " logo / badge / keyboard secrets / tray hide / explicit exit\n";
+    }
+}
 void StartupUi(const filesystem::path& executable, const filesystem::path& root) {
     ui::SetMotionOptions(4, 1); const bool animationAvailable = ui::DecorativeMotion(4); ui::SetMotionOptions(2, 1);
     for (unsigned variant = 0; variant < 7; ++variant) {
@@ -1496,6 +1609,11 @@ void StartupUi(const filesystem::path& executable, const filesystem::path& root)
                 Pump(1200);
                 Check(GetPropW(panel, L"ScreenShotPlus.StartupAnimating") && reinterpret_cast<UINT_PTR>(GetPropW(panel, L"ScreenShotPlus.StartupPhase")) == 1,
                     "native launch remains visible long enough to read its first quote");
+                if (variant == 0) {
+                    Click(panel, 210, 210); Pump(20);
+                    Check(GetPropW(panel, L"ScreenShotPlus.SecretScene") && GetPropW(panel, L"ScreenShotPlus.StartupAnimating"),
+                        "ordinary ultimate startup emblem reveals the secret without skipping the intro");
+                }
                 const wstring stem = config.animationLevel == 3 ? L"startup-extreme" : L"startup-ultimate";
                 Snapshot(panel, root / (stem + L"-poem-ui"), false);
                 if (variant == 0) SendMessageW(panel, WM_SHOW_PANEL, 0, 0);
@@ -1568,6 +1686,7 @@ int wmain(int argc, wchar_t** argv) {
     const bool personalizationOnly = argc > 1 && wstring_view(argv[1]) == L"--personalization-ui";
     const bool animationOnly = argc > 1 && wstring_view(argv[1]) == L"--animation-ui";
     const bool editorOnly = argc > 1 && wstring_view(argv[1]) == L"--editor-ui";
+    const bool stellarOnly = argc > 1 && wstring_view(argv[1]) == L"--stellar-ui";
     bool liveUi = !(argc > 1 && wstring_view(argv[1]) == L"--no-ui");
     HANDLE running = OpenMutexW(SYNCHRONIZE, FALSE, L"Local\\ScreenShotPlus.Singleton");
     if (running) { CloseHandle(running); if (!isolatedUi) liveUi = false; }
@@ -1589,15 +1708,19 @@ int wmain(int argc, wchar_t** argv) {
         if (personalizationOnly) { Configuration(root); PersonalizationUi(GetModuleHandleW(nullptr), root); }
         AnimationTiming(); cout << "PASS fractional refresh / 120 fallback / interrupted curves / time-based duration / five motion tiers / speeds / reduced motion\n";
         LaunchTiming(); cout << "PASS exact launch quotes / initialization readiness / ordered phases / adaptive time-based clocks / readable durations\n";
+        LaunchPixels(root); cout << "PASS five distinct theme palettes / native render frames / exact exit endpoint / GDI lifetime\n";
         if (liveUi && !personalizationOnly && !appOnly && !editorOnly) {
+            if (!stellarOnly) {
             AnimationUi(GetModuleHandleW(nullptr), root); cout << "PASS animation frames / hover / toggle / press / idle / hide / reopen / GDI lifetime\n";
             RichEffectsUi(GetModuleHandleW(nullptr), root); cout << "PASS layered flight / drag card / copy feedback / cancel return / accepted drop / input transparency / resource lifetime (visual fixture, not client acceptance)\n";
             CustomizationUi(GetModuleHandleW(nullptr), root); cout << "PASS capture customization / original pixels / entrance off / preview corner and size / physical DPI / restrained tiers (isolated native UI fixture)\n";
             SettingsMotionUi(GetModuleHandleW(nullptr), root); cout << "PASS native five-stop selector / light-tier forced animation / signature and final label / scrub and keyboard / style rollback and persistence / hidden idle and GDI lifetime\n";
             PersonalizationUi(GetModuleHandleW(nullptr), root);
+            }
             StartupUi(filesystem::absolute(argv[0]), root); cout << "PASS persisted extreme and ultimate startup / poem to voyage / readable duration / interruption / disabled and lower-tier suppression / silent tray startup / normal shutdown (isolated child application fixture)\n";
+            UltimateUi(filesystem::absolute(argv[0]), root);
         }
-        if (!animationOnly && !personalizationOnly && !appOnly && !editorOnly) {
+        if (!stellarOnly && !animationOnly && !personalizationOnly && !appOnly && !editorOnly) {
         Geometry(); cout << "PASS selection geometry\n";
         InstanceProcesses(filesystem::absolute(argv[0])); cout << "PASS 8 concurrent processes / single-instance mutex / restart\n";
         InstanceActivation(GetModuleHandleW(nullptr)); cout << "PASS delayed primary window / duplicate activation\n";

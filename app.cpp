@@ -39,12 +39,19 @@ struct App {
     RECT latestOrigin{}, pendingOrigin{};
     bool restorePreview = false;
     bool launching = false, launchStarted = false, initialized = false;
+    bool secret = false;
+    unsigned logoClicks = 0, secretLetters = 0;
+    ULONGLONG logoTime = 0, letterTime = 0, exitTime = 0;
+    double exitSeconds = 0;
 } app;
 const array<RectF, 5> buttons{{{24, 172, 372, 52}, {24, 236, 372, 44},
     {24, 292, 372, 44}, {24, 348, 372, 44}, {24, 404, 372, 44}}};
 const RectF closeButton{372, 16, 28, 28};
 const RectF retryButton{24, 460, 372, 44};
 constexpr UINT_PTR trayRetryTimer = 4;
+constexpr UINT_PTR exitTimer = 5;
+constexpr UINT exitFinishedMessage = WM_APP + 80;
+const RectF logoButton{24, 24, 40, 40}, launchBadge{167, 168, 86, 86};
 float Ease(float p) { p = clamp(p, 0.0f, 1.0f); return 1 - pow(1 - p, 3.0f); }
 void ConfigureUi() {
     ui::SetMotionOptions(app.config.animationLevel, app.config.animationSpeed); ui::SetAccent(app.config.accentColor);
@@ -55,7 +62,35 @@ void EndLaunch() {
     app.launching = false;
     RemovePropW(app.panel, L"ScreenShotPlus.StartupAnimating");
     RemovePropW(app.panel, L"ScreenShotPlus.StartupPhase");
+    RemovePropW(app.panel, L"ScreenShotPlus.SecretScene");
     ui::ContinuousMotion(app.panel, false);
+}
+void RevealSecret() {
+    if (app.config.animationLevel < 4 || !ui::DecorativeMotion(4) || app.exiting) return;
+    app.secret = true;
+    if (!app.launching) {
+        app.launching = app.launchStarted = true;
+        ui::RestartMotion(app.panel, LaunchSeconds(4));
+        SetPropW(app.panel, L"ScreenShotPlus.StartupAnimating", reinterpret_cast<HANDLE>(1));
+    }
+    SetPropW(app.panel, L"ScreenShotPlus.SecretScene", reinterpret_cast<HANDLE>(1));
+    InvalidateRect(app.panel, nullptr, FALSE);
+}
+void BeginExit() {
+    if (app.exiting) return;
+    if (app.config.animationLevel < 4 || !ui::DecorativeMotion(4) || !IsWindowVisible(app.panel)) {
+        DestroyWindow(app.panel); return;
+    }
+    EndLaunch(); app.exiting = true; app.mouseDown = false;
+    if (GetCapture() == app.panel) ReleaseCapture();
+    HidePreview(); KillTimer(app.panel, trayRetryTimer);
+    ReleaseHotkeys(app.panel, app.hotkeys);
+    app.exitTime = GetTickCount64(); app.exitSeconds = ui::MotionDuration(.82);
+    SetPropW(app.panel, L"ScreenShotPlus.ExitAnimating", reinterpret_cast<HANDLE>(1));
+    ui::ContinuousMotion(app.panel, true);
+    // Destruction has its own clock; it must not depend on WM_PAINT delivery.
+    if (!SetTimer(app.panel, exitTimer, 16, nullptr)) { DestroyWindow(app.panel); return; }
+    InvalidateRect(app.panel, nullptr, FALSE);
 }
 void ShowPanel() {
     if (app.exiting) return;
@@ -176,16 +211,22 @@ void HidePanel() {
     EndLaunch();
 }
 void DrawPanel(HWND hwnd, HDC target = nullptr) {
-    const bool launch = app.launching && ui::DecorativeMotion(3);
-    ui::Paint paint(hwnd, target, !launch); Graphics g(paint.buffer); ui::Prepare(g, hwnd);
+    if (app.exiting && GetTickCount64() - app.exitTime >= app.exitSeconds * 1000) {
+        // Continuous frames can starve low-priority WM_TIMER at high refresh
+        // rates. Post destruction after painting, never destroy inside a paint.
+        ui::ContinuousMotion(hwnd, false);
+        PostMessageW(hwnd, exitFinishedMessage, 0, 0);
+    }
+    const bool launch = !app.exiting && app.launching && ui::DecorativeMotion(3);
+    ui::Paint paint(hwnd, target, !launch && !app.exiting); Graphics g(paint.buffer); ui::Prepare(g, hwnd);
     const float progress = ui::EntranceProgress(hwnd);
-    const auto scene = LaunchScene(progress, app.initialized);
+    auto scene = LaunchScene(progress, app.initialized); scene.secret = app.secret;
     ui::Round(g, {24, 24, 40, 40}, 12, ui::accent);
     ui::Text(g, L"S", {35, 29, 30, 34}, 24, ui::background, true);
     ui::Text(g, L"ScreenShotPlus", {78, 27, 278, 36}, 23, ui::foreground, true);
     ui::Button(g, hwnd, closeButton, L"×", false, ui::Inside(app.mouse, closeButton));
     ui::Text(g, L"截取 · 保存 · 拖动分享", {24, 92, 372, 28}, 17);
-    ui::Text(g, L"v1.6.0", {328, 98, 68, 22}, 12, ui::accent);
+    ui::Text(g, L"v1.7.0", {328, 98, 68, 22}, 12, ui::accent);
     ui::Text(g, app.notice, {24, 128, 372, 40}, 12, ui::muted);
     const array<wstring, 5> labels{L"开始区域截图   " + HotkeyText(app.config), L"显示最新截图",
         L"打开保存目录", L"设置", L"退出程序"};
@@ -204,9 +245,22 @@ void DrawPanel(HWND hwnd, HDC target = nullptr) {
         ui::ContinuousMotion(hwnd, !scene.finished);
     }
     if (app.launching && (scene.finished || !ui::DecorativeMotion(3))) EndLaunch();
+    if (app.exiting)
+        DrawExitScene(g, static_cast<float>((GetTickCount64() - app.exitTime) / (app.exitSeconds * 1000)), app.secret);
 }
 LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == exitFinishedMessage && app.exiting) { DestroyWindow(hwnd); return 0; }
     if (ui::MotionMessage(hwnd, message, wparam, lparam)) return 0;
+    if (app.exiting) {
+        if (message == WM_TIMER && wparam == exitTimer) {
+            if (!ui::DecorativeMotion(4) || GetTickCount64() - app.exitTime >= app.exitSeconds * 1000) DestroyWindow(hwnd);
+            else InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        if (message == WM_CLOSE || message == WM_LBUTTONDOWN || (message == WM_KEYDOWN &&
+            (wparam == VK_ESCAPE || wparam == VK_RETURN || wparam == VK_SPACE))) { DestroyWindow(hwnd); return 0; }
+        if (message == WM_HOTKEY || message == WM_SHOW_PANEL || message == WM_TRAY || message == WM_LBUTTONUP) return 0;
+    }
     if (app.taskbarCreated && message == app.taskbarCreated) { app.tray.registered = false; AddTray(); return 0; }
     switch (message) {
     case WM_PAINT: DrawPanel(hwnd); return 0;
@@ -235,16 +289,20 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
     case WM_MOUSELEAVE: app.mouse = {-1, -1}; InvalidateRect(hwnd, nullptr, FALSE); return 0;
     case WM_LBUTTONDOWN:
         if (app.launching) {
+            if (ui::Inside(ui::Mouse(hwnd, lparam), launchBadge) && app.config.animationLevel >= 4) {
+                RevealSecret(); app.mouseDown = false; return 0;
+            }
             EndLaunch(); app.mouseDown = false; ui::RestartMotion(hwnd, 0); return 0;
         }
         app.pressed = ui::Mouse(hwnd, lparam); app.mouseDown = true; SetCapture(hwnd); return 0;
     case WM_CAPTURECHANGED: app.mouseDown = false; return 0;
     case WM_NCHITTEST: {
-        if (app.launching) return HTCLIENT;
+        if (app.launching || app.exiting) return HTCLIENT;
         POINT p{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)}; ScreenToClient(hwnd, &p);
         const auto s = ui::Scale(hwnd);
         p = {static_cast<LONG>(p.x / s), static_cast<LONG>(p.y / s)};
-        return p.y < 76 && !ui::Inside(p, closeButton) ? HTCAPTION : HTCLIENT;
+        return p.y < 76 && !ui::Inside(p, closeButton) &&
+            !(app.config.animationLevel >= 4 && ui::Inside(p, logoButton)) ? HTCAPTION : HTCLIENT;
     }
     case WM_LBUTTONUP: {
         const bool clicked = app.mouseDown; const POINT down = app.pressed;
@@ -252,6 +310,13 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
         if (GetCapture() == hwnd) ReleaseCapture();
         if (!clicked) return 0;
         const POINT p = ui::Mouse(hwnd, lparam);
+        if (app.config.animationLevel >= 4 && ui::Inside(p, logoButton) && ui::Inside(down, logoButton)) {
+            const auto now = GetTickCount64();
+            if (now - app.logoTime > 1600) app.logoClicks = 0;
+            app.logoTime = now;
+            if (++app.logoClicks >= 5) { app.logoClicks = 0; RevealSecret(); }
+            return 0;
+        }
         if (ui::Inside(p, closeButton) && ui::Inside(down, closeButton)) { HidePanel(); return 0; }
         if (app.pending && ui::Inside(p, retryButton) && ui::Inside(down, retryButton)) { SavePending(); return 0; }
         for (size_t i = 0; i < buttons.size(); ++i) if (ui::Inside(p, buttons[i]) && ui::Inside(down, buttons[i])) {
@@ -263,11 +328,19 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
             else if (i == 3) {
                 ShowWindow(hwnd, SW_HIDE); ShowSettings(app.config);
             }
-            else if (i == 4) DestroyWindow(hwnd);
+            else if (i == 4) BeginExit();
         }
         return 0;
     }
     case WM_KEYDOWN:
+        if (app.config.animationLevel >= 4 && wparam >= 'A' && wparam <= 'Z') {
+            constexpr wstring_view signal = L"XUANRIKKA";
+            const auto now = GetTickCount64();
+            if (now - app.letterTime > 2000) app.secretLetters = 0;
+            app.letterTime = now;
+            app.secretLetters = wparam == signal[app.secretLetters] ? app.secretLetters + 1 : wparam == signal[0] ? 1 : 0;
+            if (app.secretLetters == signal.size()) { app.secretLetters = 0; RevealSecret(); }
+        }
         if (app.launching && (wparam == VK_ESCAPE || wparam == VK_RETURN || wparam == VK_SPACE)) {
             EndLaunch(); ui::RestartMotion(hwnd, 0);
         } else if (wparam == VK_ESCAPE) HidePanel();
@@ -279,6 +352,7 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
     case WM_DESTROY:
         CancelVisualEffects();
         app.exiting = true; CancelSelection();
+        KillTimer(hwnd, exitTimer); RemovePropW(hwnd, L"ScreenShotPlus.ExitAnimating");
         KillTimer(hwnd, trayRetryTimer); RemoveTrayIcon(app.tray);
         ReleaseHotkeys(hwnd, app.hotkeys);
         DestroyEditor(); DestroySettings(); DestroyPreview(); app.latest.reset(); app.pending.reset();

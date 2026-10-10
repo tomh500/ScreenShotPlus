@@ -141,13 +141,16 @@ void Render(HWND hwnd, HDC print = nullptr) {
             }
         }
         if (animated && ui::MotionLevel() == 4) {
-            LinearGradientBrush premium(PointF(0, 0), PointF(w, 0), Color(220, 96, 134, 255), Color(230, 204, 148, 255));
+            const Color highlight(255, static_cast<BYTE>((ui::accent.GetR() + 255) / 2),
+                static_cast<BYTE>((ui::accent.GetG() + 255) / 2), static_cast<BYTE>((ui::accent.GetB() + 255) / 2));
+            LinearGradientBrush premium(PointF(0, 0), PointF(w, 0), Color(220, ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()),
+                Color(230, highlight.GetR(), highlight.GetG(), highlight.GetB()));
             Pen ribbon(&premium, 2.0f * s); g.DrawLine(&ribbon, 10 * s, -3 * s, max(10 * s, w - 10 * s), -3 * s);
             for (int i = 0; i < 10; ++i) {
                 const float phase = static_cast<float>(fmod(now * 0.25 + i * 0.173, 1.0));
                 const float x = phase * w, y = -11 * s - (i % 3) * 4 * s;
                 const float light = sin(phase * 3.14159265f);
-                SolidBrush star(Color(static_cast<BYTE>(light * 180), 213, 186, 255));
+                SolidBrush star(Color(static_cast<BYTE>(light * 180), highlight.GetR(), highlight.GetG(), highlight.GetB()));
                 g.FillEllipse(&star, x, y, (i % 3 ? 1.6f : 2.6f) * s, (i % 3 ? 1.6f : 2.6f) * s);
             }
         }

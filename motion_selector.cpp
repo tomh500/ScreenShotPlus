@@ -62,8 +62,8 @@ void AccentOrbit(Graphics& g, float x, double now, float opacity) {
 void Premium(Graphics& g, RectF r, double now, float opacity) {
     const auto state = g.Save(); ui::ClipRound(g, r, 15);
     const float wave = static_cast<float>((sin(now * 0.65) + 1) / 2);
-    array<Color, 5> colors{Color(255, 43, 59, 226), Color(255, 75, 62, 245),
-        Mix(Color(255, 136, 86, 255), Color(255, 166, 113, 255), wave), Color(255, 188, 132, 255), Color(255, 112, 62, 233)};
+    const Color deep = Mix(ui::accent, ui::background, .35f), light = Mix(ui::accent, ui::foreground, .45f);
+    array<Color, 5> colors{deep, ui::accent, Mix(ui::accent, light, wave), light, deep};
     for (auto& c : colors) c = Alpha(c, opacity);
     const array<REAL, 5> positions{0, .23f, .5f, .74f, 1};
     LinearGradientBrush gradient(PointF(r.X, r.Y), PointF(r.GetRight(), r.GetBottom()), colors.front(), colors.back());
@@ -76,9 +76,9 @@ void Premium(Graphics& g, RectF r, double now, float opacity) {
         const float y = r.Y + 5 + static_cast<float>((i * 37 + 11) % 21);
         const float twinkle = static_cast<float>(.48 + .52 * pow((sin(now * 1.4 + i * 2.13) + 1) / 2, 2));
         const float diameter = i % 7 == 0 ? 2.6f : i % 3 == 0 ? 1.8f : 1.2f;
-        SolidBrush halo(Color(static_cast<BYTE>(opacity * twinkle * 24), 236, 223, 255));
+        SolidBrush halo(Alpha(light, opacity * twinkle * .094f));
         g.FillEllipse(&halo, x - diameter * 1.7f, y - diameter * 1.7f, diameter * 3.4f, diameter * 3.4f);
-        SolidBrush star(Color(static_cast<BYTE>(opacity * twinkle * 220), 251, 244, 255));
+        SolidBrush star(Alpha(Mix(light, ui::foreground, .7f), opacity * twinkle * .86f));
         g.FillEllipse(&star, x - diameter / 2, y - diameter / 2, diameter, diameter);
         if (i % 9 == 0) { Pen ray(Color(static_cast<BYTE>(opacity * twinkle * 100), 255, 250, 255), .65f); g.DrawLine(&ray, x - 3, y, x + 3, y); g.DrawLine(&ray, x, y - 3, x, y + 3); }
     }
@@ -111,19 +111,19 @@ bool MotionSelector::Draw(Graphics& g, HWND hwnd, bool hovered, bool focused) {
     position = ui::AnimateValue(hwnd, 6000, static_cast<float>(level), .22, position, true);
     const float hover = ui::AnimateValue(hwnd, 6002, hovered ? 1.0f : 0.0f, .16, 0, true);
     ui::Round(g, {24, 152, 452, 232}, 18, Color(255, 33, 39, 49));
-    ui::Border(g, {24.5f, 152.5f, 451, 231}, 18, Mix(Mix(Color(255, 64, 73, 88), ui::accent, stellar * .25f), Color(255, 126, 102, 200), premium * .48f));
+    ui::Border(g, {24.5f, 152.5f, 451, 231}, 18, Mix(Mix(Color(255, 64, 73, 88), ui::accent, stellar * .25f), ui::accent, premium * .48f));
     ui::Text(g, L"动画强度", {44, 170, 250, 24}, 13, ui::muted);
     const auto info = ui::GetMotionInfo(hwnd);
     ui::Round(g, {378, 168, 76, 25}, 12, Color(255, 44, 51, 65));
     CenterText(g, to_wstring(static_cast<unsigned>(lround(info.refreshRate))) + L" Hz", {378, 168, 76, 25}, 11, ui::muted);
     const float textProgress = labelTime ? Smooth(static_cast<float>((now - labelTime) / .18)) : 1;
-    const Color titleColor = Mix(ui::accent, Color(255, 185, 146, 255), premium);
+    const Color titleColor = Mix(ui::accent, Mix(ui::accent, ui::foreground, .35f), premium);
     const auto textState = g.Save(); g.SetClip(RectF(52, 199, 396, 37), CombineModeIntersect);
     if (textProgress < 1) CenterText(g, previousTitle, {52, 200 - textProgress * 10, 396, 32}, 22, Alpha(titleColor, 1 - textProgress), true);
     CenterText(g, title, {52, 200 + (1 - textProgress) * 10, 396, 32}, title == L"XuanRikka" ? 21.0f : 23.0f, Alpha(titleColor, textProgress), true);
     g.Restore(textState);
     CenterText(g, level == 4 ? L"ULTIMATE · 星光随行" : level == 3 ? L"STELLAR MOTION · 流光与星轨" : L"FLUENT MOTION · 连贯每一步",
-        {44, 237, 412, 24}, 10.5f, Mix(Mix(ui::muted, ui::accent, stellar * .25f), Color(255, 185, 169, 225), premium));
+        {44, 237, 412, 24}, 10.5f, Mix(Mix(ui::muted, ui::accent, stellar * .25f), Mix(ui::accent, ui::foreground, .45f), premium));
     const RectF track{48, 274, 404, 30};
     ui::Round(g, track, 15, Color(255, 57, 64, 78));
     const float knob = 62 + position * 94;
@@ -150,10 +150,10 @@ bool MotionSelector::Draw(Graphics& g, HWND hwnd, bool hovered, bool focused) {
     const float diameter = 32 + hover;
     ui::Round(g, {knob - diameter / 2, 289 - diameter / 2, diameter, diameter}, diameter / 2, Color(255, 251, 253, 255));
     ui::Border(g, {knob - diameter / 2 + .5f, 289 - diameter / 2 + .5f, diameter - 1, diameter - 1}, diameter / 2,
-        Mix(Color(255, 201, 209, 221), Color(255, 218, 192, 255), premium));
-    if (focused) ui::Border(g, {knob - 20, 269, 40, 40}, 20, Mix(ui::accent, Color(255, 181, 141, 255), premium));
+        Mix(Color(255, 201, 209, 221), Mix(ui::accent, ui::foreground, .65f), premium));
+    if (focused) ui::Border(g, {knob - 20, 269, 40, 40}, 20, Mix(ui::accent, ui::foreground, premium * .25f));
     for (unsigned i = 0; i < 5; ++i) CenterText(g, names[i], {30 + 94.0f * i, 318, 64, 26}, 12,
-        level == i ? (i == 4 ? Color(255, 192, 160, 255) : ui::accent) : ui::muted, level == i);
+        level == i ? (i == 4 ? Mix(ui::accent, ui::foreground, .35f) : ui::accent) : ui::muted, level == i);
     CenterText(g, descriptions[level], {40, 351, 420, 22}, 11.5f, ui::muted);
     return level >= 3 || premium > .001f || stellar > .001f || ultimateTime || textProgress < 1 || engraving > .001f;
 }

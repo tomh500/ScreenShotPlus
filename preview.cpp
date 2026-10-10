@@ -12,10 +12,11 @@ struct Preview {
     POINT mouse{-1, -1}, pressed{};
     bool pressing = false, dragging = false;
     ULONGLONG remaining = 0, lastTick = 0;
-    function<void()> drag, edit;
+    function<void()> drag, edit, locate;
     wstring dragStatus;
     unsigned corner = 0, size = 1;
     bool captureAnimation = true, dragAnimation = true;
+    bool rightClickLocation = true, filename = true, hints = true, hideAfterDrag = false;
 } preview;
 int viewWidth = 320, viewHeight = 294;
 RectF closeButton{278, 12, 28, 28}, imageRect{16, 52, 288, 166};
@@ -85,8 +86,9 @@ void DrawPreview(HWND hwnd, HDC target = nullptr) {
             viewHeight - 58 + 3 * (1 - frameReveal), 94, 18}, 7.5f,
             Color(static_cast<BYTE>(bloom * 85), ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()));
     }
-    ui::Text(g, preview.dragging ? L"移动到目标位置，松开即可复制" : L"单击编辑 · 拖动分享", {16, static_cast<float>(viewHeight - 63), imageRect.Width, 24}, 12);
-    ui::Text(g, preview.file.filename().wstring(), {16, static_cast<float>(viewHeight - 35), imageRect.Width, 22}, 10, ui::muted);
+    if (preview.hints) ui::Text(g, preview.dragging ? L"移动到目标位置，松开即可复制" :
+        preview.rightClickLocation ? L"单击编辑 · 拖动分享 · 右键定位" : L"单击编辑 · 拖动分享", {16, static_cast<float>(viewHeight - 63), imageRect.Width, 24}, 12);
+    if (preview.filename) ui::Text(g, preview.file.filename().wstring(), {16, static_cast<float>(viewHeight - 35), imageRect.Width, 22}, 10, ui::muted);
 }
 LRESULT CALLBACK PreviewProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     if (ui::MotionMessage(hwnd, msg, wparam, lparam)) return 0;
@@ -115,6 +117,10 @@ LRESULT CALLBACK PreviewProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
             dy < GetSystemMetricsForDpi(SM_CYDRAG, GetDpiForWindow(hwnd)) && preview.edit) preview.edit();
         return 0;
     }
+    case WM_RBUTTONUP:
+        if (preview.rightClickLocation && !preview.pressing && !preview.dragging &&
+            ui::Inside(ui::Mouse(hwnd, lparam), imageRect) && preview.locate) preview.locate();
+        return 0;
     case WM_CAPTURECHANGED: preview.pressing = false; return 0;
     case WM_MOUSEMOVE: {
         preview.mouse = ui::Mouse(hwnd, lparam);
@@ -151,7 +157,7 @@ LRESULT CALLBACK PreviewProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
     return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 }
-bool InitPreview(HINSTANCE instance, function<void()> drag, function<void()> edit) {
+bool InitPreview(HINSTANCE instance, function<void()> drag, function<void()> edit, function<void()> locate) {
     WNDCLASSEXW cls{sizeof(cls)};
     cls.hInstance = instance; cls.lpfnWndProc = PreviewProc; cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     cls.lpszClassName = L"ScreenShotPlus.Preview";
@@ -159,7 +165,7 @@ bool InitPreview(HINSTANCE instance, function<void()> drag, function<void()> edi
     if (!GetClassInfoExW(instance, cls.lpszClassName, &existing) && !RegisterClassExW(&cls)) return false;
     preview.window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
         cls.lpszClassName, L"ScreenShotPlus 最新截图", WS_POPUP, 0, 0, 320, 294, nullptr, nullptr, instance, nullptr);
-    preview.drag = move(drag); preview.edit = move(edit);
+    preview.drag = move(drag); preview.edit = move(edit); preview.locate = move(locate);
     if (preview.window) ui::Corners(preview.window);
     return preview.window != nullptr;
 }
@@ -167,6 +173,11 @@ void ConfigurePreview(unsigned corner, unsigned size, bool captureAnimation, boo
     preview.corner = min(corner, 3u); preview.size = min(size, 2u); preview.captureAnimation = captureAnimation;
     preview.dragAnimation = dragAnimation;
     Layout(); preview.thumbnail.Reset();
+}
+void ConfigurePreview(const Config& config) {
+    ConfigurePreview(config.previewCorner, config.previewSize, config.captureAnimation, config.dragAnimation);
+    preview.rightClickLocation = config.rightClickLocation; preview.filename = config.previewFilename;
+    preview.hints = config.previewHints; preview.hideAfterDrag = config.hideAfterDrag;
 }
 void ShowPreview(Bitmap* image, const filesystem::path& file, POINT point, unsigned seconds, RECT origin) {
     if (!preview.window || !image) return;
@@ -191,6 +202,7 @@ RECT PreviewImageScreenRect() {
     return {x, y, x + static_cast<LONG>(lround(w * dpi)), y + static_cast<LONG>(lround(h * dpi))};
 }
 void PreviewDragResult(bool accepted) {
+    if (accepted && preview.hideAfterDrag) { HidePreview(); return; }
     preview.dragStatus = accepted ? L"已复制 · 原图保留" : L"已返回 · 原图保留";
     if (preview.window) InvalidateRect(preview.window, nullptr, FALSE);
 }
@@ -205,5 +217,5 @@ bool PreviewVisible() { return preview.window && IsWindowVisible(preview.window)
 void DestroyPreview() {
     CancelVisualEffects();
     if (preview.window) { KillTimer(preview.window, 1); DestroyWindow(preview.window); preview.window = nullptr; }
-    preview.thumbnail.Reset(); preview.image = nullptr; preview.drag = {}; preview.edit = {};
+    preview.thumbnail.Reset(); preview.image = nullptr; preview.drag = {}; preview.edit = {}; preview.locate = {};
 }

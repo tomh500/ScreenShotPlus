@@ -212,6 +212,21 @@ filesystem::path KnownFolder(REFKNOWNFOLDERID id) {
     if (FAILED(SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, nullptr, &value))) return {};
     filesystem::path path(value); CoTaskMemFree(value); return path;
 }
+bool RevealFile(const filesystem::path& path, wstring& error) {
+    error.clear(); error_code ec;
+    if (!path.is_absolute() || !filesystem::is_regular_file(path, ec)) {
+        error = L"无法定位截图：文件已移动、删除或无法访问。"; return false;
+    }
+    PIDLIST_ABSOLUTE item = nullptr;
+    HRESULT result = SHParseDisplayName(path.c_str(), nullptr, &item, 0, nullptr);
+    if (SUCCEEDED(result)) result = SHOpenFolderAndSelectItems(item, 0, nullptr, 0);
+    CoTaskMemFree(item);
+    if (FAILED(result)) {
+        error = L"无法在资源管理器中定位截图（错误 " + to_wstring(static_cast<unsigned long>(result)) + L"）。";
+        return false;
+    }
+    return true;
+}
 bool OpenFolder(const filesystem::path& path) {
     error_code ec; filesystem::create_directories(path, ec);
     if (ec) return false;

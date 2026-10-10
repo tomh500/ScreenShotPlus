@@ -8,6 +8,7 @@ struct Config {
     unsigned previewSeconds = 0;
     unsigned animationLevel = 3, animationSpeed = 1, accentColor = 0;
     unsigned previewCorner = 0, previewSize = 1, captureShade = 60;
+    bool rightClickLocation = true, previewFilename = true, previewHints = true, hideAfterDrag = false;
     bool captureAnimation = true, dragAnimation = true, startupAnimation = true, captureGuides = true;
 };
 Config DefaultConfig();

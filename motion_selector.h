@@ -7,6 +7,7 @@ struct MotionSelector {
     unsigned level = 3;
     float position = 3;
     double labelTime = 0, ultimateTime = 0, engravingTime = 0;
+    double resonanceTime = 0;
     bool wasHovered = false;
     std::wstring previousTitle = L"极高", title = L"极高";
     void Reset(unsigned value);

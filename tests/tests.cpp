@@ -914,6 +914,27 @@ void SettingsMotionUi(HINSTANCE instance, const filesystem::path& root) {
     Pump(500);
     cout << "Ultimate selector steady target: " << ui::GetMotionInfo(hwnd).refreshRate << " Hz, frame messages: "
         << ui::GetMotionInfo(hwnd).frames - steadyFrames << " in " << GetTickCount64() - steadyStart << " ms (scheduler sample, not presented FPS)\n";
+    for (unsigned theme = 0; theme < 5; ++theme) {
+        Click(hwnd, 250, 92); Click(hwnd, 70 + 90 * theme, 211);
+        Click(hwnd, 160, 92); Pump(350);
+        const float scale = ui::Scale(hwnd);
+        const auto pixel = PrintedPixel(hwnd, static_cast<int>(90 * scale), static_cast<int>(289 * scale));
+        Check(pixel != CLR_INVALID && GetBValue(pixel) > GetRValue(pixel) && GetRValue(pixel) > GetGValue(pixel),
+            "ultimate slider keeps the purple accent hue under every application theme");
+        if (theme == 2) {
+            Click(hwnd, 344, 289); Pump(350);
+            Pointer(hwnd, WM_LBUTTONDOWN, 344, 289, MK_LBUTTON);
+            Pointer(hwnd, WM_MOUSEMOVE, 438, 289, MK_LBUTTON); Pointer(hwnd, WM_LBUTTONUP, 438, 289);
+            Pump(240); Snapshot(hwnd, root / L"selector-resonance-entry", false);
+            Check(GetSettingsState().working.animationLevel == 4 && !GetSettingsState().sliderDragging,
+                "purple theme reaches ultimate through a real captured drag and releases input");
+            Pump(550); Snapshot(hwnd, root / L"selector-resonance-orbits", false);
+            Click(hwnd, 344, 289); Pump(400);
+            Check(GetSettingsState().title == L"极高", "reversing the purple transition cancels the entry flourish");
+            Click(hwnd, 438, 289); Pump(1900); Snapshot(hwnd, root / L"selector-resonance-settled", false);
+        } else Snapshot(hwnd, root / (L"selector-purple-theme-" + to_wstring(theme)), false);
+    }
+    Click(hwnd, 250, 92); Click(hwnd, 70, 211); Click(hwnd, 160, 92); Pump(350);
     Pointer(hwnd, WM_LBUTTONDOWN, 62, 289, MK_LBUTTON);
     Check(GetSettingsState().sliderDragging && GetCapture() == hwnd, "selector captures the pointer while scrubbing");
     Pointer(hwnd, WM_MOUSEMOVE, 438, 289, MK_LBUTTON);

@@ -39,7 +39,7 @@ struct Effect {
     LayerSurface layer;
     RectF origin, destination, current, release;
     float scale = 1, tilt = 0, fade = 1;
-    double lastTime = 0;
+    double lastTime = 0, createdTime = 0;
     POINT pointer{};
     DWORD feedback = DROPEFFECT_NONE, error = 0;
     UINT_PTR cookie = 0;
@@ -120,13 +120,25 @@ void Render(HWND hwnd, HDC print = nullptr) {
         g.SetInterpolationMode(InterpolationModeBilinear); g.DrawImage(effect.image.get(), RectF(0, 0, w, h));
         g.Restore(saved);
         const float accepted = ui::AnimateValue(hwnd, 1, effect.feedback & DROPEFFECT_COPY ? 1.0f : 0.0f, 0.14);
+        const float lifted = animated && ui::MotionLevel() >= 3 ? ui::AnimateValue(hwnd, 2, 1, .34) : 1;
+        const float bloom = sin((1 - cbrt(max(0.0f, 1 - lifted))) * 3.14159265f);
         ui::Border(g, {-3 * s, -3 * s, w + 6 * s, h + 6 * s}, 14 * s,
             Color(220, static_cast<BYTE>(92 + (ui::accent.GetR() - 92) * accepted),
                 static_cast<BYTE>(106 + (ui::accent.GetG() - 106) * accepted), static_cast<BYTE>(122 + (ui::accent.GetB() - 122) * accepted)));
         if (animated && ui::MotionLevel() >= 3) {
+            for (int i = 2; i >= 1; --i) {
+                const float margin = (3 + i * 2.4f) * s;
+                ui::Border(g, {-margin, -margin, w + 2 * margin, h + 2 * margin}, 14 * s + margin,
+                    Color(static_cast<BYTE>((bloom * .55f + accepted * .28f) * (22 - i * 5)), ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()));
+            }
             const float shine = static_cast<float>(fmod(now * 0.42, 1.0));
             Pen rim(Color(110, ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()), 1.4f * s);
             g.DrawLine(&rim, w * shine - 24 * s, -3 * s, min(w, w * shine + 24 * s), -3 * s);
+            for (int i = 0; i < 5; ++i) {
+                const float phase = static_cast<float>(fmod(now * .16 + i * .213, 1.0)), twinkle = sin(phase * 3.14159265f);
+                SolidBrush star(Color(static_cast<BYTE>(twinkle * (80 + accepted * 65)), ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()));
+                g.FillEllipse(&star, phase * w, -9 * s - (i % 2) * 5 * s, 1.6f * s, 1.6f * s);
+            }
         }
         if (animated && ui::MotionLevel() == 4) {
             LinearGradientBrush premium(PointF(0, 0), PointF(w, 0), Color(220, 96, 134, 255), Color(230, 204, 148, 255));
@@ -146,6 +158,9 @@ void Render(HWND hwnd, HDC print = nullptr) {
             ui::Border(g, badge, 15 * s, effect.feedback & DROPEFFECT_COPY ? ui::accent : Color(255, 90, 101, 118));
             ui::Text(g, effect.feedback & DROPEFFECT_COPY ? L"＋  松开即可复制" : L"选择可接收的位置", {badge.X + 12 * s, badge.Y + 6 * s,
                 badge.Width - 20 * s, 22 * s}, 11 * s, effect.feedback & DROPEFFECT_COPY ? ui::accent : ui::muted, true);
+            const float age = static_cast<float>(now - effect.createdTime), hidden = clamp((age - .8f) / .22f, 0.0f, 1.0f) * clamp((1.9f - age) / .55f, 0.0f, 1.0f);
+            if (animated && ui::MotionLevel() >= 3 && hidden > 0) ui::Text(g, L"XuanRikka", {max(0.0f, w - 76 * s), h + 42 * s, 74 * s, 12 * s},
+                7.0f * s, Color(static_cast<BYTE>(hidden * 80), ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()));
         }
         g.Flush(FlushIntentionSync);
     }
@@ -213,7 +228,7 @@ bool Start(Bitmap& image, RECT origin, RECT destination, Effect::Mode mode) {
     }
     if (!copied) { CancelVisualEffects(); return false; }
     effect.tilt = 0; effect.fade = 1; effect.feedback = DROPEFFECT_NONE; effect.presented = false; effect.error = 0;
-    effect.lastTime = Now(); GetCursorPos(&effect.pointer);
+    effect.lastTime = effect.createdTime = Now(); GetCursorPos(&effect.pointer);
     ShowWindow(effect.window, SW_SHOWNOACTIVATE); ui::RestartMotion(effect.window, mode == Effect::Landing ? 0.36 : 0.18);
     ui::ContinuousMotion(effect.window, true); UpdateWindow(effect.window);
     return true;

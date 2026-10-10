@@ -40,6 +40,10 @@ void DrawPreview(HWND hwnd, HDC target = nullptr) {
     ui::Round(g, imageRect, 10, ui::surface);
     const auto motion = ui::AnimateControl(hwnd, imageRect, ui::Inside(preview.mouse, imageRect));
     const float lifted = ui::AnimateValue(hwnd, 10, preview.dragging && preview.dragAnimation ? 1.0f : 0.0f, 0.20);
+    const bool rich = preview.captureAnimation && ui::DecorativeMotion(3);
+    const float frameReveal = rich ? ui::AnimateValue(hwnd, 11, 1, 0.52) : 1;
+    const float phase = 1 - cbrt(max(0.0f, 1 - frameReveal));
+    const float bloom = max(0.0f, sin(phase * 3.14159265f));
     if (preview.image) {
         const float scale = min(imageRect.Width / preview.image->GetWidth(), imageRect.Height / preview.image->GetHeight());
         const float w = preview.image->GetWidth() * scale, h = preview.image->GetHeight() * scale;
@@ -56,6 +60,31 @@ void DrawPreview(HWND hwnd, HDC target = nullptr) {
     if (lifted > 0) ui::Round(g, imageRect, 10, Color(static_cast<BYTE>(lifted * 100), 25, 29, 36));
     ui::Border(g, imageRect, 10, Color(static_cast<BYTE>(70 + motion.hover * 150),
         ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()));
+    if (rich && frameReveal < 1) {
+        // One finite reveal: a soft frame bloom and a light that travels along
+        // the four edges. The original thumbnail and hit rectangle stay fixed.
+        for (int i = 3; i >= 1; --i) {
+            RectF halo = imageRect; halo.Inflate(i * 1.4f, i * 1.4f);
+            ui::Border(g, halo, 10 + i * 1.4f, Color(static_cast<BYTE>(bloom * (28 - i * 5)),
+                ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()));
+        }
+        const array<PointF, 5> edge{{{imageRect.X + 9, imageRect.Y}, {imageRect.GetRight() - 9, imageRect.Y},
+            {imageRect.GetRight() - 9, imageRect.GetBottom()}, {imageRect.X + 9, imageRect.GetBottom()}, {imageRect.X + 9, imageRect.Y}}};
+        const float perimeter = 2 * (imageRect.Width - 18 + imageRect.Height), head = phase * (perimeter + 76);
+        Pen glint(Color(static_cast<BYTE>(bloom * 200), ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()), 1.8f);
+        glint.SetStartCap(LineCapRound); glint.SetEndCap(LineCapRound);
+        float traversed = 0;
+        for (int i = 0; i < 4; ++i) {
+            const float dx = edge[i + 1].X - edge[i].X, dy = edge[i + 1].Y - edge[i].Y, length = hypot(dx, dy);
+            const float begin = clamp(head - 76 - traversed, 0.0f, length), end = clamp(head - traversed, 0.0f, length);
+            if (end > begin) g.DrawLine(&glint, edge[i].X + dx * begin / length, edge[i].Y + dy * begin / length,
+                edge[i].X + dx * end / length, edge[i].Y + dy * end / length);
+            traversed += length;
+        }
+        if (!preview.dragging) ui::Text(g, L"XuanRikka", {static_cast<float>(viewWidth - 113),
+            viewHeight - 58 + 3 * (1 - frameReveal), 94, 18}, 7.5f,
+            Color(static_cast<BYTE>(bloom * 85), ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()));
+    }
     ui::Text(g, preview.dragging ? L"移动到目标位置，松开即可复制" : L"单击编辑 · 拖动分享", {16, static_cast<float>(viewHeight - 63), imageRect.Width, 24}, 12);
     ui::Text(g, preview.file.filename().wstring(), {16, static_cast<float>(viewHeight - 35), imageRect.Width, 22}, 10, ui::muted);
 }

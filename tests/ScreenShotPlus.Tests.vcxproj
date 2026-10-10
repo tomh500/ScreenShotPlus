@@ -36,7 +36,7 @@
     <ResourceCompile><AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ResourceCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="tests.cpp" /><ClCompile Include="..\ui.cpp" /><ClCompile Include="..\animation.cpp" /><ClCompile Include="..\visual_effects.cpp" /><ClCompile Include="..\config.cpp" />
+    <ClCompile Include="tests.cpp" /><ClCompile Include="..\ui.cpp" /><ClCompile Include="..\animation.cpp" /><ClCompile Include="..\launch_scene.cpp" /><ClCompile Include="..\visual_effects.cpp" /><ClCompile Include="..\config.cpp" />
     <ClCompile Include="..\storage.cpp" /><ClCompile Include="..\dragdrop.cpp" /><ClCompile Include="..\capture.cpp" />
     <ClCompile Include="..\preview.cpp" /><ClCompile Include="..\settings.cpp" /><ClCompile Include="..\motion_selector.cpp" /><ClCompile Include="..\app.cpp" /><ClCompile Include="..\hotkeys.cpp" /><ClCompile Include="..\startup.cpp" /><ClCompile Include="..\instance.cpp" /><ClCompile Include="..\tray.cpp" /><ClCompile Include="..\annotation.cpp" /><ClCompile Include="..\editor.cpp" />
     <ResourceCompile Include="..\ScreenShotPlus.rc" />

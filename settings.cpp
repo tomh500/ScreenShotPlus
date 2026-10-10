@@ -113,7 +113,7 @@ bool DrawMotion(Graphics& g, HWND hwnd) {
     ui::Toggle(g, hwnd, startupMotionButton, L"启动动画", settings.working.startupAnimation, ui::Inside(settings.mouse, startupMotionButton));
     ui::Toggle(g, hwnd, captureMotionButton, L"唤醒截图与完成转场", settings.working.captureAnimation, ui::Inside(settings.mouse, captureMotionButton));
     ui::Toggle(g, hwnd, dragMotionButton, L"拖动图片与落点反馈", settings.working.dragAnimation, ui::Inside(settings.mouse, dragMotionButton));
-    ui::Text(g, L"终极档位拥有专属启动演绎。滑块始终丝滑响应。\n系统关闭动画时，应用动效会尊重系统设置。", {24, 660, 452, 40}, 11, ui::muted);
+    ui::Text(g, L"极高与终极拥有专属启动演绎。滑块始终丝滑响应。\n系统关闭动画时，应用动效会尊重系统设置。", {24, 660, 452, 40}, 11, ui::muted);
     return continuous;
 }
 void DrawAppearance(Graphics& g, HWND hwnd) {

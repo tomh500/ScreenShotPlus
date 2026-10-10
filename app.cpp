@@ -12,6 +12,7 @@
 #include "tray.h"
 #include "instance.h"
 #include "visual_effects.h"
+#include "launch_scene.h"
 using namespace std;
 using namespace Gdiplus;
 namespace {
@@ -37,7 +38,7 @@ struct App {
     POINT latestPoint{}, pendingPoint{};
     RECT latestOrigin{}, pendingOrigin{};
     bool restorePreview = false;
-    bool launching = false;
+    bool launching = false, launchStarted = false, initialized = false;
 } app;
 const array<RectF, 5> buttons{{{24, 172, 372, 52}, {24, 236, 372, 44},
     {24, 292, 372, 44}, {24, 348, 372, 44}, {24, 404, 372, 44}}};
@@ -45,15 +46,16 @@ const RectF closeButton{372, 16, 28, 28};
 const RectF retryButton{24, 460, 372, 44};
 constexpr UINT_PTR trayRetryTimer = 4;
 float Ease(float p) { p = clamp(p, 0.0f, 1.0f); return 1 - pow(1 - p, 3.0f); }
-void BrandText(Graphics& g, const wstring& text, RectF rect, float size, Color color, bool bold = false) {
-    Font font(L"Microsoft YaHei UI", size, bold ? FontStyleBold : FontStyleRegular, UnitPixel);
-    StringFormat format; format.SetAlignment(StringAlignmentCenter); format.SetLineAlignment(StringAlignmentCenter);
-    SolidBrush brush(color); g.DrawString(text.c_str(), static_cast<INT>(text.size()), &font, rect, &format, &brush);
-}
 void ConfigureUi() {
     ui::SetMotionOptions(app.config.animationLevel, app.config.animationSpeed); ui::SetAccent(app.config.accentColor);
     ConfigureCapture(app.config.captureShade, app.config.captureGuides, app.config.captureAnimation);
     ConfigurePreview(app.config.previewCorner, app.config.previewSize, app.config.captureAnimation, app.config.dragAnimation);
+}
+void EndLaunch() {
+    app.launching = false;
+    RemovePropW(app.panel, L"ScreenShotPlus.StartupAnimating");
+    RemovePropW(app.panel, L"ScreenShotPlus.StartupPhase");
+    ui::ContinuousMotion(app.panel, false);
 }
 void ShowPanel() {
     if (app.exiting) return;
@@ -61,7 +63,9 @@ void ShowPanel() {
     if (app.phase != App::Idle) return;
     if (SettingsVisible()) { ShowSettings(app.config); return; }
     ui::Place(app.panel, 420, 570); ShowWindow(app.panel, SW_SHOW);
-    if (app.launching) ui::RestartMotion(app.panel, 0.84);
+    if (app.launching && !app.launchStarted) {
+        ui::RestartMotion(app.panel, LaunchSeconds(app.config.animationLevel)); app.launchStarted = true;
+    }
     SetForegroundWindow(app.panel); InvalidateRect(app.panel, nullptr, FALSE);
 }
 void Notice(const wstring& text) { app.notice = text; ShowPanel(); }
@@ -84,6 +88,7 @@ void SavePending() {
 }
 void StartCapture() {
     if (app.phase != App::Idle || SettingsVisible() || app.exiting) return;
+    EndLaunch();
     app.restorePreview = PreviewVisible();
     ShowWindow(app.panel, SW_HIDE); HidePreview(); DwmFlush();
     app.phase = App::Selecting;
@@ -163,81 +168,37 @@ void AddTray() {
 void HidePanel() {
     AddTray(); if (!app.tray.registered) return;
     ShowWindow(app.panel, SW_HIDE);
-    app.launching = false;
-    RemovePropW(app.panel, L"ScreenShotPlus.StartupAnimating");
-}
-void DrawStartup(Graphics& g, float progress) {
-    const float bloom = Ease(progress / 0.44f), exit = Ease((progress - 0.48f) / 0.40f);
-    const BYTE veil = static_cast<BYTE>(lround((1 - exit) * 255));
-    SolidBrush mask(Color(veil, 25, 29, 36)); g.FillRectangle(&mask, 0.0f, 0.0f, 420.0f, 570.0f);
-    if (veil == 0) return;
-    const float cx = 210, cy = 218 - exit * 26, alpha = (1 - exit) * Ease(progress / 0.12f);
-    // The restrained halo and star paths are time based, never frame counted.
-    for (int i = 11; i > 0; --i) {
-        const float radius = 46 + i * 5 + (1 - bloom) * 22;
-        SolidBrush glow(Color(static_cast<BYTE>(alpha * 3), 107, 93, 255));
-        g.FillEllipse(&glow, cx - radius, cy - radius, 2 * radius, 2 * radius);
-    }
-    for (int i = 0; i < 28; ++i) {
-        const float angle = i * 2.399963f + progress * (i % 2 ? 0.32f : -0.24f);
-        const float radius = 68 + (i % 7) * 17 - bloom * 12;
-        const float x = cx + cos(angle) * radius, y = cy + sin(angle) * radius * 0.67f;
-        const float intensity = alpha * (0.36f + 0.64f * pow(sin(progress * 6 + i * 1.7f), 2.0f));
-        SolidBrush star(Color(static_cast<BYTE>(intensity * 150), 200, 187, 255));
-        const float size = i % 6 == 0 ? 2.1f : 1.1f; g.FillEllipse(&star, x, y, size * 2, size * 2);
-        if (i % 6 == 0) {
-            Pen rays(Color(static_cast<BYTE>(intensity * 120), 219, 207, 255), 0.8f);
-            g.DrawLine(&rays, x - 4, y + size, x + 6, y + size); g.DrawLine(&rays, x + size, y - 4, x + size, y + 6);
-        }
-    }
-    const auto saved = g.Save();
-    const float zoom = 0.76f + 0.24f * ui::SpringReveal(clamp(progress / 0.52f, 0.0f, 1.0f));
-    g.TranslateTransform(cx, cy); g.ScaleTransform(zoom, zoom); g.RotateTransform((1 - bloom) * -8);
-    ui::Round(g, {-37, -37, 74, 74}, 23, Color(static_cast<BYTE>(alpha * 255), 74, 58, 169));
-    auto badge = g.Save(); ui::ClipRound(g, {-37, -37, 74, 74}, 23);
-    LinearGradientBrush jewel(PointF(-37, -37), PointF(37, 37), Color(static_cast<BYTE>(alpha * 255), 74, 106, 245),
-        Color(static_cast<BYTE>(alpha * 255), 184, 100, 250));
-    g.FillRectangle(&jewel, -37.0f, -37.0f, 74.0f, 74.0f); g.Restore(badge);
-    ui::Border(g, {-37, -37, 74, 74}, 23, Color(static_cast<BYTE>(alpha * 170), 221, 201, 255));
-    Pen frame(Color(static_cast<BYTE>(alpha * 245), 250, 246, 255), 2.5f); frame.SetStartCap(LineCapRound); frame.SetEndCap(LineCapRound);
-    const float draw = clamp(progress / 0.34f, 0.0f, 1.0f);
-    for (int i = 0; i < 4; ++i) {
-        const float x = i & 1 ? 16.0f : -16.0f, y = i & 2 ? 13.0f : -13.0f;
-        g.DrawLine(&frame, x, y, x + (i & 1 ? -9 : 9) * draw, y);
-        g.DrawLine(&frame, x, y, x, y + (i & 2 ? -8 : 8) * draw);
-    }
-    g.Restore(saved);
-    const float title = Ease((progress - 0.10f) / 0.26f), titleY = cy + 64 + 9 * (1 - title);
-    BrandText(g, L"ScreenShotPlus", {50, titleY, 320, 42}, 28, Color(static_cast<BYTE>(alpha * title * 255), 246, 240, 255), true);
-    BrandText(g, L"灵感，即刻定格", {100, titleY + 44, 220, 26}, 13, Color(static_cast<BYTE>(alpha * title * 200), 185, 178, 218));
-    BrandText(g, L"XuanRikka · Ultimate", {70, 492, 280, 26}, 12, Color(static_cast<BYTE>(alpha * 170), 192, 165, 255));
+    EndLaunch();
 }
 void DrawPanel(HWND hwnd, HDC target = nullptr) {
-    const bool launch = app.launching && ui::DecorativeMotion(4);
+    const bool launch = app.launching && ui::DecorativeMotion(3);
     ui::Paint paint(hwnd, target, !launch); Graphics g(paint.buffer); ui::Prepare(g, hwnd);
     const float progress = ui::EntranceProgress(hwnd);
+    const auto scene = LaunchScene(progress, app.initialized);
     ui::Round(g, {24, 24, 40, 40}, 12, ui::accent);
     ui::Text(g, L"S", {35, 29, 30, 34}, 24, ui::background, true);
     ui::Text(g, L"ScreenShotPlus", {78, 27, 278, 36}, 23, ui::foreground, true);
     ui::Button(g, hwnd, closeButton, L"×", false, ui::Inside(app.mouse, closeButton));
     ui::Text(g, L"截取 · 保存 · 拖动分享", {24, 92, 372, 28}, 17);
-    ui::Text(g, L"v1.4.0", {328, 98, 68, 22}, 12, ui::accent);
+    ui::Text(g, L"v1.5.0", {328, 98, 68, 22}, 12, ui::accent);
     ui::Text(g, app.notice, {24, 128, 372, 40}, 12, ui::muted);
     const array<wstring, 5> labels{L"开始区域截图   " + HotkeyText(app.config), L"显示最新截图",
         L"打开保存目录", L"设置", L"退出程序"};
     for (size_t i = 0; i < buttons.size(); ++i) {
         const auto state = g.Save();
-        if (launch) g.TranslateTransform(0, 18 * (1 - Ease((progress - 0.45f - static_cast<float>(i) * 0.045f) / 0.30f)));
+        if (launch) g.TranslateTransform(0, 20 * (1 - Ease((progress - 0.82f - static_cast<float>(i) * 0.018f) / 0.10f)));
         ui::Button(g, hwnd, buttons[i], labels[i], i == 0, ui::Inside(app.mouse, buttons[i]));
         g.Restore(state);
     }
     if (app.pending) ui::Button(g, hwnd, retryButton, L"重试保存未保存的截图", false, ui::Inside(app.mouse, retryButton));
     ui::Text(g, app.tray.registered ? L"关闭此面板后，程序仍在托盘运行" : L"托盘不可用，面板会保留；可在上方退出程序",
         {24, 530, 372, 24}, 12, ui::muted);
-    if (launch) DrawStartup(g, progress);
-    if (progress >= 1 || !ui::DecorativeMotion(4)) {
-        app.launching = false; RemovePropW(hwnd, L"ScreenShotPlus.StartupAnimating");
+    if (launch) {
+        DrawLaunchScene(g, scene, app.config.animationLevel);
+        if (!scene.finished) SetPropW(hwnd, L"ScreenShotPlus.StartupPhase", reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(scene.phase)));
+        ui::ContinuousMotion(hwnd, !scene.finished);
     }
+    if (app.launching && (scene.finished || !ui::DecorativeMotion(3))) EndLaunch();
 }
 LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     if (ui::MotionMessage(hwnd, message, wparam, lparam)) return 0;
@@ -268,10 +229,13 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
     }
     case WM_MOUSELEAVE: app.mouse = {-1, -1}; InvalidateRect(hwnd, nullptr, FALSE); return 0;
     case WM_LBUTTONDOWN:
-        if (app.launching) { app.launching = false; RemovePropW(hwnd, L"ScreenShotPlus.StartupAnimating"); ui::RestartMotion(hwnd, 0); }
+        if (app.launching) {
+            EndLaunch(); app.mouseDown = false; ui::RestartMotion(hwnd, 0); return 0;
+        }
         app.pressed = ui::Mouse(hwnd, lparam); app.mouseDown = true; SetCapture(hwnd); return 0;
     case WM_CAPTURECHANGED: app.mouseDown = false; return 0;
     case WM_NCHITTEST: {
+        if (app.launching) return HTCLIENT;
         POINT p{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)}; ScreenToClient(hwnd, &p);
         const auto s = ui::Scale(hwnd);
         p = {static_cast<LONG>(p.x / s), static_cast<LONG>(p.y / s)};
@@ -298,7 +262,11 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam
         }
         return 0;
     }
-    case WM_KEYDOWN: if (wparam == VK_ESCAPE) HidePanel(); return 0;
+    case WM_KEYDOWN:
+        if (app.launching && (wparam == VK_ESCAPE || wparam == VK_RETURN || wparam == VK_SPACE)) {
+            EndLaunch(); ui::RestartMotion(hwnd, 0);
+        } else if (wparam == VK_ESCAPE) HidePanel();
+        return 0;
     case WM_DPICHANGED: {
         ui::DpiChanged(hwnd, lparam, 420, 570);
         return 0;
@@ -322,7 +290,7 @@ int RunApp(HINSTANCE instance, const filesystem::path& configFile, bool trayStar
     app.allowPortableConfig = configFile.empty();
     wstring warning; app.config = LoadConfig(app.configFile, warning);
     ConfigureUi();
-    app.launching = !trayStartup && app.config.startupAnimation && ui::DecorativeMotion(4);
+    app.launching = !trayStartup && app.config.startupAnimation && ui::DecorativeMotion(3);
     if (!warning.empty()) app.notice = warning;
     app.taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
     WNDCLASSEXW cls{sizeof(cls)};
@@ -348,6 +316,7 @@ int RunApp(HINSTANCE instance, const filesystem::path& configFile, bool trayStar
     wcscpy_s(app.tray.data.szTip, L"ScreenShotPlus · 区域截图与拖动分享"); AddTray();
     const auto hotkeyWarning = RegisterConfiguredHotkeys(app.panel, app.hotkeys, app.config);
     if (!hotkeyWarning.empty()) app.notice += L" " + hotkeyWarning;
+    app.initialized = true;
     if (!trayStartup) ShowPanel();
     SetPropW(app.panel, L"ScreenShotPlus.Ready", reinterpret_cast<HANDLE>(1));
     MSG message{}; BOOL result;

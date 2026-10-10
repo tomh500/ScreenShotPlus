@@ -12,6 +12,7 @@
 #include "instance.h"
 #include "tray.h"
 #include "visual_effects.h"
+#include "launch_scene.h"
 #include <nlohmann/json.hpp>
 #include <atomic>
 #include <iostream>
@@ -175,6 +176,46 @@ void AnimationTiming() {
     Check(quick < normal && normal < relaxed && quick > 0, "three speed settings retain time-based positive duration");
     ui::SetMotionOptions(2, 1);
 }
+void LaunchTiming() {
+    Check(wstring_view(LaunchPoem) == L"危楼高百尺，手可摘星辰" && wstring_view(LaunchVoyage) == L"我的征途是星辰大海",
+        "stellar launch preserves both requested quotes exactly");
+    const auto first = LaunchScene(.25f, true), second = LaunchScene(.7f, true), final = LaunchScene(1, true);
+    Check(first.phase == 1 && first.poem > .95f && first.voyage == 0 && !first.finished,
+        "launch first phase presents the poem before the voyage");
+    Check(second.phase == 2 && second.voyage > .95f && second.poem == 0 && !second.finished,
+        "launch second phase presents the voyage after initialization");
+    Check(final.finished && final.phase == 0 && final.depart == 1,
+        "stellar launch finishes at an exact usable-panel endpoint");
+    for (const float invalid : {-1.0f, numeric_limits<float>::infinity(), numeric_limits<float>::quiet_NaN()}) {
+        const auto frame = LaunchScene(invalid, true);
+        Check(frame.progress == 0 && !frame.finished && isfinite(frame.reveal), "invalid launch progress clamps safely to its initial frame");
+    }
+    const auto pending = LaunchScene(1, false);
+    Check(pending.phase == 1 && pending.progress <= .43f && pending.voyage == 0 && !pending.finished,
+        "initialization not ready keeps the poem and prevents premature departure");
+    for (const unsigned level : {3u, 4u}) {
+        ui::SetMotionOptions(level, 0); const double quick = ui::MotionDuration(LaunchSeconds(level));
+        ui::SetMotionOptions(level, 1); const double balanced = ui::MotionDuration(LaunchSeconds(level));
+        ui::SetMotionOptions(level, 2); const double slow = ui::MotionDuration(LaunchSeconds(level));
+        Check(quick > 3 && quick < balanced && balanced < slow && slow < 9,
+            "extreme and ultimate launch retain a readable spectacle at every speed");
+        for (const double refresh : {59.94, 60.0, 120.0, 144.0, 240.0}) {
+            unsigned previousPhase = 1;
+            const int last = static_cast<int>(ceil(balanced * refresh));
+            for (int index = 0; index <= last; ++index) {
+                const auto frame = LaunchScene(static_cast<float>(index / refresh / balanced), true);
+                for (const float value : {frame.progress, frame.reveal, frame.depart, frame.poem, frame.voyage})
+                    Check(isfinite(value) && value >= 0 && value <= 1, "launch scene parameters stay finite and bounded at every refresh rate");
+                if (!frame.finished) {
+                    Check(frame.phase >= previousPhase && frame.phase <= 2, "launch quote phases advance in order without flicker");
+                    previousPhase = frame.phase;
+                }
+                if (index == last) Check(frame.finished, "launch total duration is independent of monitor refresh rate");
+            }
+        }
+    }
+    ui::SetMotionOptions(2, 1);
+}
 struct MotionFixture { bool hovered = false, enabled = false; };
 LRESULT CALLBACK MotionFixtureProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     if (ui::MotionMessage(hwnd, message, wparam, lparam)) return 0;
@@ -272,6 +313,7 @@ void RichEffectsUi(HINSTANCE instance, const filesystem::path& root) {
     Check(source.right > source.left && source.bottom > source.top, "preview maps its image to physical screen pixels");
     const DWORD baseline = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
     for (int iteration = 0; iteration < 3; ++iteration) {
+        ui::SetMotionOptions(static_cast<unsigned>(iteration + 2), 1);
         Check(BeginDragVisual(image, source), "start floating drag card");
         Pump(260); info = GetVisualEffectInfo();
         Check(info.window && info.dragging && info.presented && !info.error, "drag card runs while dragging");
@@ -284,6 +326,12 @@ void RichEffectsUi(HINSTANCE instance, const filesystem::path& root) {
         DragVisualFeedback(DROPEFFECT_COPY); Pump(150);
         Check(GetVisualEffectInfo().effect == DROPEFFECT_COPY && ui::GetMotionInfo(info.window).frames > frames, "copy feedback and pointer-follow frames update");
         if (iteration == 0) Snapshot(info.window, root / L"drag-copy-ui", false);
+        if (iteration > 0) {
+            Pump(700);
+            info = GetVisualEffectInfo();
+            Check(info.window && info.presented && !info.error, "extreme and ultimate drag chrome and transient signature stay valid during a sustained drag");
+            Snapshot(info.window, root / (iteration == 1 ? L"drag-extreme-ui" : L"drag-ultimate-ui"), false);
+        }
         if (iteration == 1) {
             EndDragVisual(true); Pump(230); Check(!GetVisualEffectInfo().window, "accepted drop contracts and closes");
         } else {
@@ -291,11 +339,12 @@ void RichEffectsUi(HINSTANCE instance, const filesystem::path& root) {
             if (iteration == 0) Snapshot(info.window, root / L"drag-unavailable-ui", false);
             EndDragVisual(false);
             Check(GetVisualEffectInfo().returning, "canceled drop starts return transition");
-            Pump(330); Check(!GetVisualEffectInfo().window, "canceled card returns and releases resources");
+            Pump(420); Check(!GetVisualEffectInfo().window, "canceled card returns and releases resources");
         }
         Check(filesystem::exists(file), "drag visual never removes source PNG");
         Check(GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) <= baseline + 2, "layered drag DIBs and DCs released");
     }
+    ui::SetMotionOptions(2, 1);
     Check(BeginDragVisual(image, source), "start effect before new capture");
     Check(BeginSelection(instance, [](unique_ptr<Bitmap>, POINT, wstring) {}, error), "new capture cancels old visual before desktop freeze");
     Check(!GetVisualEffectInfo().window, "floating card excluded from next screenshot"); CancelSelection();
@@ -426,7 +475,7 @@ void Configuration(const filesystem::path& root) {
     const auto file = root / L"设置" / L"config.json";
     Config c = DefaultConfig(); c.folder = root / L"截图 中文 空格";
     c.modifiers = MOD_CONTROL | MOD_ALT; c.key = VK_F9; c.printScreen = true; c.previewSeconds = 15; c.startup = true;
-    Check(c.animationLevel == 2 && c.animationSpeed == 1 && c.accentColor == 0 && c.previewCorner == 0 &&
+    Check(c.animationLevel == 3 && c.animationSpeed == 1 && c.accentColor == 0 && c.previewCorner == 0 &&
         c.previewSize == 1 && c.captureShade == 60 && c.captureAnimation && c.dragAnimation &&
         c.startupAnimation && c.captureGuides, "new customization defaults preserve existing behavior");
     c.animationLevel = 4; c.animationSpeed = 2; c.accentColor = 3; c.previewCorner = 2;
@@ -450,10 +499,13 @@ void Configuration(const filesystem::path& root) {
         "captureShade", "captureAnimation", "dragAnimation", "startupAnimation", "captureGuides"}) legacy.erase(key);
     { ofstream out(file); out << legacy; }
     warning.clear(); loaded = LoadConfig(file, warning);
-    Check(!loaded.startup && warning.empty() && loaded.animationLevel == 2 && loaded.animationSpeed == 1 &&
+    Check(!loaded.startup && warning.empty() && loaded.animationLevel == 3 && loaded.animationSpeed == 1 &&
         loaded.accentColor == 0 && loaded.previewCorner == 0 && loaded.previewSize == 1 && loaded.captureShade == 60 &&
         loaded.captureAnimation && loaded.dragAnimation && loaded.startupAnimation && loaded.captureGuides,
         "legacy config loads safe customization defaults without migration");
+    { auto explicitPreset = legacy; explicitPreset["animationLevel"] = 2; ofstream out(file); out << explicitPreset; }
+    warning.clear(); loaded = LoadConfig(file, warning);
+    Check(warning.empty() && loaded.animationLevel == 2, "new extreme default preserves an explicitly chosen older high tier");
     for (unsigned level = 0; level < 5; ++level) {
         c.animationLevel = level;
         c.animationSpeed = level % 3; c.accentColor = level;
@@ -472,7 +524,7 @@ void Configuration(const filesystem::path& root) {
             auto invalid = data; invalid[key] = bad;
             { ofstream out(file); out << invalid; }
             warning.clear(); loaded = LoadConfig(file, warning);
-            Check(!warning.empty() && loaded.animationLevel == 2 && loaded.key == 'S',
+            Check(!warning.empty() && loaded.animationLevel == 3 && loaded.key == 'S',
                 "malformed customization values cannot wrap or partially replace configuration");
         }
     }
@@ -665,7 +717,7 @@ void SettingsMotionUi(HINSTANCE instance, const filesystem::path& root) {
         ~RestoreOptions() { DestroySettings(); ui::SetMotionOptions(2, 1); ui::SetAccent(0); }
     } restore;
     const auto file = root / L"settings-customization" / L"config.json";
-    Config initial = DefaultConfig(); initial.folder = root / L"settings-customization-images";
+    Config initial = DefaultConfig(); initial.folder = root / L"settings-customization-images"; initial.animationLevel = 2;
     wstring error, warning; Check(SaveConfig(file, initial, error), "persist settings fixture baseline");
     unsigned applied = 0;
     Check(InitSettings(instance, nullptr, [&](const Config& config, wstring& failure) {
@@ -1282,11 +1334,11 @@ void ExecutableSmoke(const filesystem::path& executable) {
 }
 void StartupUi(const filesystem::path& executable, const filesystem::path& root) {
     ui::SetMotionOptions(4, 1); const bool animationAvailable = ui::DecorativeMotion(4); ui::SetMotionOptions(2, 1);
-    for (unsigned variant = 0; variant < 4; ++variant) {
+    for (unsigned variant = 0; variant < 7; ++variant) {
         const bool enabled = variant != 1, tray = variant == 2;
         Config config = DefaultConfig(); config.folder = root / L"startup-fixture-images";
         config.modifiers = MOD_CONTROL | MOD_ALT | MOD_SHIFT; config.key = VK_F19;
-        config.animationLevel = variant == 3 ? 2 : 4; config.startupAnimation = enabled;
+        config.animationLevel = variant == 3 ? 2 : variant == 4 || variant == 5 ? 3 : 4; config.startupAnimation = enabled;
         const auto file = root / (L"startup-" + to_wstring(variant)) / L"config.json";
         wstring error; Check(SaveConfig(file, config, error), "isolated persisted startup animation preference");
         STARTUPINFOW startup{sizeof(startup)}; PROCESS_INFORMATION child{};
@@ -1318,15 +1370,41 @@ void StartupUi(const filesystem::path& executable, const filesystem::path& root)
             if (!panel) Pump(15);
         }
         Check(panel && WaitForSingleObject(child.hProcess, 0) == WAIT_TIMEOUT, "startup fixture initializes its real message loop");
-        const bool expected = variant == 0 && animationAvailable;
+        const bool expected = (variant == 0 || variant >= 4) && animationAvailable;
         Check((GetPropW(panel, L"ScreenShotPlus.StartupAnimating") != nullptr) == expected,
-            "startup reads ultimate preference and honors disabled, lower-tier and tray launch policies");
+            "startup reads extreme and ultimate preferences and honors disabled, lower-tier and tray launch policies");
         if (expected) {
-            Pump(240); Snapshot(panel, root / L"startup-ultimate-ui", false);
-            const auto finish = GetTickCount64() + 2500;
-            while (GetPropW(panel, L"ScreenShotPlus.StartupAnimating") && GetTickCount64() < finish) Pump(20);
-            Check(!GetPropW(panel, L"ScreenShotPlus.StartupAnimating") && IsWindowVisible(panel), "ultimate startup settles to usable panel");
-            Snapshot(panel, root / L"startup-settled-ui");
+            const auto started = GetTickCount64();
+            if (variant >= 5) {
+                Pump(500);
+                if (variant == 5) {
+                    const float scale = ui::Scale(panel);
+                    const LPARAM point = MAKELPARAM(static_cast<int>(100 * scale), static_cast<int>(198 * scale));
+                    SendMessageW(panel, WM_LBUTTONDOWN, MK_LBUTTON, point); SendMessageW(panel, WM_LBUTTONUP, 0, point);
+                } else SendMessageW(panel, WM_KEYDOWN, VK_ESCAPE, 0);
+                Pump(160);
+                Check(!GetPropW(panel, L"ScreenShotPlus.StartupAnimating") && !GetPropW(panel, L"ScreenShotPlus.StartupPhase") && IsWindowVisible(panel),
+                    "pointer and keyboard skip clear startup state without hiding or activating the underlying capture button");
+                cout << "PASS launch interruption variant=" << variant << '\n';
+            } else {
+                Pump(1200);
+                Check(GetPropW(panel, L"ScreenShotPlus.StartupAnimating") && reinterpret_cast<UINT_PTR>(GetPropW(panel, L"ScreenShotPlus.StartupPhase")) == 1,
+                    "native launch remains visible long enough to read its first quote");
+                const wstring stem = config.animationLevel == 3 ? L"startup-extreme" : L"startup-ultimate";
+                Snapshot(panel, root / (stem + L"-poem-ui"), false);
+                if (variant == 0) SendMessageW(panel, WM_SHOW_PANEL, 0, 0);
+                const auto finish = started + 8500;
+                while (reinterpret_cast<UINT_PTR>(GetPropW(panel, L"ScreenShotPlus.StartupPhase")) != 2 && GetTickCount64() < finish) Pump(20);
+                Check(reinterpret_cast<UINT_PTR>(GetPropW(panel, L"ScreenShotPlus.StartupPhase")) == 2 && GetPropW(panel, L"ScreenShotPlus.Ready"),
+                    "native launch reaches the second quote only after actual application initialization");
+                Pump(450); Snapshot(panel, root / (stem + L"-voyage-ui"), false);
+                while (GetPropW(panel, L"ScreenShotPlus.StartupAnimating") && GetTickCount64() < finish) Pump(20);
+                const auto duration = GetTickCount64() - started;
+                Check(!GetPropW(panel, L"ScreenShotPlus.StartupAnimating") && !GetPropW(panel, L"ScreenShotPlus.StartupPhase") && IsWindowVisible(panel) && duration >= 3500 && duration < 8500,
+                    "native launch has an extended readable duration and settles once without replaying on panel activation");
+                Snapshot(panel, root / (stem + L"-settled-ui"));
+                cout << "PASS native launch level=" << config.animationLevel << " elapsedMs=" << duration << " poem / ready voyage / settled\n";
+            }
         } else {
             if (tray && GetPropW(panel, L"ScreenShotPlus.TrayRegistered")) Check(!IsWindowVisible(panel), "tray launch keeps startup silent");
             Pump(400); Check(!GetPropW(panel, L"ScreenShotPlus.StartupAnimating"), "suppressed startup never starts a delayed intro");
@@ -1335,7 +1413,7 @@ void StartupUi(const filesystem::path& executable, const filesystem::path& root)
         Check(WaitForSingleObject(child.hProcess, 5000) == WAIT_OBJECT_0, "isolated startup fixture shuts down normally");
         DWORD code = 1; GetExitCodeProcess(child.hProcess, &code); Check(code == 0, "startup fixture exits successfully");
     }
-    if (!animationAvailable) cout << "SKIP ultimate startup choreography: system reduced motion is enabled; startup suppression verified\n";
+    if (!animationAvailable) cout << "SKIP stellar startup choreography: system reduced motion is enabled; startup suppression verified\n";
 }
 }
 int wmain(int argc, wchar_t** argv) {
@@ -1393,12 +1471,13 @@ int wmain(int argc, wchar_t** argv) {
     try {
         filesystem::create_directories(root);
         AnimationTiming(); cout << "PASS fractional refresh / 120 fallback / interrupted curves / time-based duration / five motion tiers / speeds / reduced motion\n";
+        LaunchTiming(); cout << "PASS exact launch quotes / initialization readiness / ordered phases / adaptive time-based clocks / readable durations\n";
         if (liveUi) {
             AnimationUi(GetModuleHandleW(nullptr), root); cout << "PASS animation frames / hover / toggle / press / idle / hide / reopen / GDI lifetime\n";
             RichEffectsUi(GetModuleHandleW(nullptr), root); cout << "PASS layered flight / drag card / copy feedback / cancel return / accepted drop / input transparency / resource lifetime (visual fixture, not client acceptance)\n";
             CustomizationUi(GetModuleHandleW(nullptr), root); cout << "PASS capture customization / original pixels / entrance off / preview corner and size / physical DPI / restrained tiers (isolated native UI fixture)\n";
             SettingsMotionUi(GetModuleHandleW(nullptr), root); cout << "PASS native five-stop selector / light-tier forced animation / signature and final label / scrub and keyboard / style rollback and persistence / hidden idle and GDI lifetime\n";
-            StartupUi(filesystem::absolute(argv[0]), root); cout << "PASS persisted ultimate startup / disabled and lower-tier suppression / silent tray startup / normal shutdown (isolated child application fixture)\n";
+            StartupUi(filesystem::absolute(argv[0]), root); cout << "PASS persisted extreme and ultimate startup / poem to voyage / readable duration / interruption / disabled and lower-tier suppression / silent tray startup / normal shutdown (isolated child application fixture)\n";
         }
         if (!animationOnly) {
         Geometry(); cout << "PASS selection geometry\n";

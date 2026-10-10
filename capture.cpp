@@ -143,6 +143,9 @@ void DrawSelection(HWND hwnd, HDC target = nullptr) {
     g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
     g.SetClip(Rect(dirty.left, dirty.top, dirty.right - dirty.left, dirty.bottom - dirty.top));
     const float reveal = captureAnimation ? ui::AnimateValue(hwnd, 1, selection.active ? 1.0f : 0.0f, 0.18) : (selection.active ? 1.0f : 0.0f);
+    const bool rich = captureAnimation && ui::DecorativeMotion(3);
+    const float shimmer = rich ? ui::AnimateValue(hwnd, 7, selection.active ? 1.0f : 0.0f, .36) : 1;
+    const float pulse = rich ? sin((1 - cbrt(max(0.0f, 1 - shimmer))) * 3.14159265f) : 0;
     if (selection.active && w > 0 && h > 0) {
         const RectF bounds{static_cast<float>(r.left), static_cast<float>(r.top), static_cast<float>(w - 1), static_cast<float>(h - 1)};
         Pen halo(Color(40, ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()), 6 * scale);
@@ -154,6 +157,14 @@ void DrawSelection(HWND hwnd, HDC target = nullptr) {
             const float x = i & 1 ? bounds.GetRight() : bounds.X, y = i & 2 ? bounds.GetBottom() : bounds.Y;
             g.DrawLine(&corner, x, y, x + (i & 1 ? -length : length), y);
             g.DrawLine(&corner, x, y, x, y + (i & 2 ? -length : length));
+            if (pulse > .01f) {
+                Pen flash(Color(static_cast<BYTE>(pulse * 180), 239, 255, 251), 1.2f * scale);
+                const float offset = pulse * 4 * scale, dx = i & 1 ? -1.0f : 1.0f, dy = i & 2 ? -1.0f : 1.0f;
+                g.DrawLine(&flash, x - offset * dx, y, x + length * dx, y);
+                g.DrawLine(&flash, x, y - offset * dy, x, y + length * dy);
+                SolidBrush spark(Color(static_cast<BYTE>(pulse * 175), ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()));
+                g.FillEllipse(&spark, x - offset * dx - scale, y - offset * dy - scale, 2 * scale, 2 * scale);
+            }
         }
         const float labelWidth = 252 * scale, labelHeight = 42 * scale;
         const float x = clamp(static_cast<float>(r.left), 0.0f, max(0.0f, paint.width - labelWidth));
@@ -177,6 +188,14 @@ void DrawSelection(HWND hwnd, HDC target = nullptr) {
         ui::Round(g, {0, 3 * scale, width, 66 * scale}, 18 * scale, Color(60, 0, 0, 0));
         ui::Round(g, {0, 0, width, 66 * scale}, 18 * scale, ui::background);
         ui::Border(g, {0, 0, width, 66 * scale}, 18 * scale, Color(130, ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()));
+        const float glint = rich ? ui::AnimateValue(hwnd, 8, 1, .56) : 1;
+        if (rich && glint < 1) {
+            const float phase = 1 - cbrt(max(0.0f, 1 - glint)), head = phase * (width + 72 * scale);
+            Pen trail(Color(static_cast<BYTE>(sin(phase * 3.14159265f) * 215), ui::accent.GetR(), ui::accent.GetG(), ui::accent.GetB()), 1.8f * scale);
+            trail.SetStartCap(LineCapRound); trail.SetEndCap(LineCapRound);
+            g.DrawLine(&trail, clamp(head - 72 * scale, 18 * scale, width - 18 * scale), 0.0f,
+                clamp(head, 18 * scale, width - 18 * scale), 0.0f);
+        }
         ui::Round(g, {16 * scale, 17 * scale, 32 * scale, 32 * scale}, 9 * scale, ui::accent);
         ui::Text(g, L"＋", {19 * scale, 18 * scale, 30 * scale, 28 * scale}, 21 * scale, ui::background, true);
         ui::Text(g, L"选择你的截图区域", {62 * scale, 11 * scale, width - 74 * scale, 27 * scale}, 16 * scale, ui::foreground, true);

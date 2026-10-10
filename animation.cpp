@@ -12,7 +12,7 @@ namespace {
 constexpr UINT frameMessage = WM_APP + 70;
 constexpr UINT optionsMessage = WM_APP + 74;
 constexpr wchar_t stateProperty[] = L"ScreenShotPlus.Motion";
-atomic<unsigned> motionLevel{2}, motionSpeed{1};
+atomic<unsigned> motionLevel{3}, motionSpeed{1};
 atomic<bool> systemMotionEnabled{true};
 double Now() { return chrono::duration<double>(chrono::steady_clock::now().time_since_epoch()).count(); }
 bool AnimationsEnabled() {

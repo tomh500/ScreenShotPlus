@@ -23,8 +23,8 @@ const RectF closeButton{452, 16, 28, 28}, folderButton{24, 180, 452, 44},
     startupMotionButton{24, 486, 452, 44}, captureMotionButton{24, 544, 452, 44},
     dragMotionButton{24, 602, 452, 44}, guidesButton{24, 340, 452, 44}, shadeSliderHit{44, 222, 412, 52};
 constexpr array<const wchar_t*, 5> tabNames{L"常规", L"动效", L"外观", L"截图", L"交互"};
-const array<RectF, 4> interactionButtons{{{24, 166, 452, 44}, {24, 278, 452, 44},
-    {24, 390, 452, 44}, {24, 502, 452, 44}}};
+const array<RectF, 6> interactionButtons{{{24, 158, 452, 44}, {24, 246, 452, 44},
+    {24, 334, 452, 44}, {24, 422, 452, 44}, {24, 510, 452, 44}, {24, 598, 452, 44}}};
 double Now() { return GetTickCount64() / 1000.0; }
 void Touch() {
     if (settings.window) ui::MotionRegion(settings.window, nullptr);
@@ -187,21 +187,24 @@ void DrawScreenshot(Graphics& g, HWND hwnd) {
 }
 void DrawInteraction(Graphics& g, HWND hwnd) {
     ui::Text(g, L"按你的习惯，调整图片预览与分享。", {24, 124, 452, 22}, 12, ui::muted);
-    const array<bool, 4> values{settings.working.rightClickLocation, settings.working.previewFilename,
-        settings.working.previewHints, settings.working.hideAfterDrag};
-    constexpr array<const wchar_t*, 4> titles{L"右键图片打开所在位置", L"显示图片文件名", L"显示图片操作提示", L"分享成功后收起缩略图"};
-    constexpr array<const wchar_t*, 4> descriptions{
+    const array<bool, 6> values{settings.working.rightClickLocation, settings.working.previewFilename,
+        settings.working.previewHints, settings.working.hideAfterDrag,
+        settings.working.previewTopmost, settings.working.previewMovable};
+    constexpr array<const wchar_t*, 6> titles{L"右键图片打开所在位置", L"显示图片文件名", L"显示图片操作提示", L"分享成功后收起缩略图",
+        L"浮窗永远置顶", L"允许拖动浮窗位置"};
+    constexpr array<const wchar_t*, 6> descriptions{
         L"右键缩略图中的图片，在资源管理器中选中该 PNG。",
         L"在缩略图底部显示已保存图片的文件名。",
         L"显示单击编辑、拖动分享与右键定位的提示。",
-        L"接收程序确认复制后自动收起；取消或失败时保留。"};
+        L"接收程序确认复制后自动收起；取消或失败时保留。",
+        L"保持在普通应用窗口上方，不抢占键盘焦点。",
+        L"拖动标题或空白区域移动浮窗；拖动图片仍用于分享。"};
     for (unsigned i = 0; i < interactionButtons.size(); ++i) {
         const auto rect = interactionButtons[i];
         ui::Toggle(g, hwnd, rect, titles[i], values[i], ui::Inside(settings.mouse, rect));
-        ui::Text(g, descriptions[i], {24, rect.Y + 54, 452, 40}, 11.5f, ui::muted);
+        ui::Text(g, descriptions[i], {24, rect.Y + 49, 452, 30}, 11.5f, ui::muted);
     }
-    ui::Round(g, {24, 614, 452, 72}, 12, ui::surface);
-    ui::Text(g, L"保存后应用于预览。收起缩略图始终保留原文件，\n可从操作面板再次显示最新截图。", {40, 628, 420, 44}, 12, ui::muted);
+    ui::Text(g, L"保存后应用于预览。收起浮窗后，截图文件仍然保留。", {24, 686, 452, 24}, 11.5f, ui::muted);
 }
 void DrawSettings(HWND hwnd, HDC target = nullptr) {
     ui::Paint paint(hwnd, target); Graphics g(paint.buffer);
@@ -280,8 +283,9 @@ void HandleClick(POINT down, POINT p) {
     } else if (settings.tab == 3) {
         if (hit(guidesButton)) settings.working.captureGuides = !settings.working.captureGuides;
     } else if (settings.tab == 4) {
-        const array<bool*, 4> values{&settings.working.rightClickLocation, &settings.working.previewFilename,
-            &settings.working.previewHints, &settings.working.hideAfterDrag};
+        const array<bool*, 6> values{&settings.working.rightClickLocation, &settings.working.previewFilename,
+            &settings.working.previewHints, &settings.working.hideAfterDrag,
+            &settings.working.previewTopmost, &settings.working.previewMovable};
         for (unsigned i = 0; i < values.size(); ++i) if (hit(interactionButtons[i])) *values[i] = !*values[i];
     }
 }

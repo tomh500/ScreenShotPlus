@@ -17,6 +17,7 @@ struct Preview {
     unsigned corner = 0, size = 1;
     bool captureAnimation = true, dragAnimation = true;
     bool rightClickLocation = true, filename = true, hints = true, hideAfterDrag = false;
+    bool topmost = true, movable = true, moving = false, positioned = false;
 } preview;
 int viewWidth = 320, viewHeight = 294;
 RectF closeButton{278, 12, 28, 28}, imageRect{16, 52, 288, 166};
@@ -97,6 +98,16 @@ LRESULT CALLBACK PreviewProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
     case WM_PRINTCLIENT: DrawPreview(hwnd, reinterpret_cast<HDC>(wparam)); return 0;
     case WM_ERASEBKGND: return 1;
     case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+    case WM_NCHITTEST: {
+        POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        ScreenToClient(hwnd, &point);
+        const float scale = ui::Scale(hwnd);
+        const POINT logical{static_cast<LONG>(point.x / scale), static_cast<LONG>(point.y / scale)};
+        return preview.movable && !ui::Inside(logical, closeButton) && !ui::Inside(logical, imageRect) ? HTCAPTION : HTCLIENT;
+    }
+    case WM_ENTERSIZEMOVE: preview.moving = true; return 0;
+    case WM_EXITSIZEMOVE:
+        preview.moving = false; preview.positioned = true; preview.lastTick = GetTickCount64(); return 0;
     case WM_CLOSE: HidePreview(); return 0;
     case WM_LBUTTONDOWN: {
         preview.mouse = ui::Mouse(hwnd, lparam);
@@ -144,7 +155,7 @@ LRESULT CALLBACK PreviewProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
         POINT p{}; GetCursorPos(&p); RECT r{}; GetWindowRect(hwnd, &r);
         const ULONGLONG now = GetTickCount64(), elapsed = now - preview.lastTick;
         preview.lastTick = now;
-        if (!preview.dragging && !preview.pressing && !PtInRect(&r, p)) {
+        if (!preview.dragging && !preview.pressing && !preview.moving && !PtInRect(&r, p)) {
             if (elapsed >= preview.remaining) HidePreview();
             else preview.remaining -= elapsed;
         }
@@ -163,13 +174,14 @@ bool InitPreview(HINSTANCE instance, function<void()> drag, function<void()> edi
     cls.lpszClassName = L"ScreenShotPlus.Preview";
     WNDCLASSEXW existing{sizeof(existing)};
     if (!GetClassInfoExW(instance, cls.lpszClassName, &existing) && !RegisterClassExW(&cls)) return false;
-    preview.window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
+    preview.window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | (preview.topmost ? WS_EX_TOPMOST : 0),
         cls.lpszClassName, L"ScreenShotPlus 最新截图", WS_POPUP, 0, 0, 320, 294, nullptr, nullptr, instance, nullptr);
     preview.drag = move(drag); preview.edit = move(edit); preview.locate = move(locate);
     if (preview.window) ui::Corners(preview.window);
     return preview.window != nullptr;
 }
 void ConfigurePreview(unsigned corner, unsigned size, bool captureAnimation, bool dragAnimation) {
+    if (preview.corner != min(corner, 3u)) preview.positioned = false;
     preview.corner = min(corner, 3u); preview.size = min(size, 2u); preview.captureAnimation = captureAnimation;
     preview.dragAnimation = dragAnimation;
     Layout(); preview.thumbnail.Reset();
@@ -178,6 +190,9 @@ void ConfigurePreview(const Config& config) {
     ConfigurePreview(config.previewCorner, config.previewSize, config.captureAnimation, config.dragAnimation);
     preview.rightClickLocation = config.rightClickLocation; preview.filename = config.previewFilename;
     preview.hints = config.previewHints; preview.hideAfterDrag = config.hideAfterDrag;
+    preview.topmost = config.previewTopmost; preview.movable = config.previewMovable;
+    if (preview.window) SetWindowPos(preview.window, preview.topmost ? HWND_TOPMOST : HWND_NOTOPMOST,
+        0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 void ShowPreview(Bitmap* image, const filesystem::path& file, POINT point, unsigned seconds, RECT origin) {
     if (!preview.window || !image) return;
@@ -186,7 +201,18 @@ void ShowPreview(Bitmap* image, const filesystem::path& file, POINT point, unsig
     preview.remaining = static_cast<ULONGLONG>(seconds) * 1000; preview.lastTick = GetTickCount64();
     KillTimer(preview.window, 1);
     if (seconds) SetTimer(preview.window, 1, 100, nullptr);
+    RECT previous{}; GetWindowRect(preview.window, &previous);
+    if (preview.positioned) point = {(previous.left + previous.right) / 2, (previous.top + previous.bottom) / 2};
     Layout(); ui::Place(preview.window, viewWidth, viewHeight, true, point, preview.corner);
+    if (preview.positioned) {
+        MONITORINFO monitor{sizeof(monitor)}; RECT resized{};
+        if (GetMonitorInfoW(MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST), &monitor) && GetWindowRect(preview.window, &resized)) {
+            previous.left = clamp(previous.left, monitor.rcWork.left, max(monitor.rcWork.left, monitor.rcWork.right - (resized.right - resized.left)));
+            previous.top = clamp(previous.top, monitor.rcWork.top, max(monitor.rcWork.top, monitor.rcWork.bottom - (resized.bottom - resized.top)));
+        }
+    }
+    SetWindowPos(preview.window, preview.topmost ? HWND_TOPMOST : HWND_NOTOPMOST,
+        previous.left, previous.top, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | (preview.positioned ? 0 : SWP_NOMOVE));
     ui::RestartMotion(preview.window);
     ShowWindow(preview.window, SW_SHOWNOACTIVATE); InvalidateRect(preview.window, nullptr, FALSE);
     if (preview.captureAnimation && ui::DecorativeMotion(2) && origin.right > origin.left && origin.bottom > origin.top)
@@ -218,4 +244,5 @@ void DestroyPreview() {
     CancelVisualEffects();
     if (preview.window) { KillTimer(preview.window, 1); DestroyWindow(preview.window); preview.window = nullptr; }
     preview.thumbnail.Reset(); preview.image = nullptr; preview.drag = {}; preview.edit = {}; preview.locate = {};
+    preview.moving = preview.positioned = false;
 }

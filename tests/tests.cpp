@@ -546,11 +546,11 @@ void Configuration(const filesystem::path& root) {
     c.modifiers = MOD_CONTROL | MOD_ALT; c.key = VK_F9; c.printScreen = true; c.previewSeconds = 15; c.startup = true;
     Check(c.animationLevel == 3 && c.animationSpeed == 1 && c.accentColor == 0 && c.previewCorner == 0 &&
         c.previewSize == 1 && c.captureShade == 60 && c.captureAnimation && c.dragAnimation &&
-        c.startupAnimation && c.captureGuides && c.rightClickLocation && c.previewFilename && c.previewHints && !c.hideAfterDrag, "new customization defaults preserve existing behavior");
+        c.startupAnimation && c.captureGuides && c.rightClickLocation && c.previewFilename && c.previewHints && !c.hideAfterDrag && c.previewTopmost && c.previewMovable, "new customization defaults preserve existing behavior");
     c.animationLevel = 4; c.animationSpeed = 2; c.accentColor = 3; c.previewCorner = 2;
     c.previewSize = 0; c.captureShade = 75;
     c.captureAnimation = false; c.dragAnimation = false; c.startupAnimation = false; c.captureGuides = false;
-    c.rightClickLocation = false; c.previewFilename = false; c.previewHints = false; c.hideAfterDrag = true;
+    c.rightClickLocation = false; c.previewFilename = false; c.previewHints = false; c.hideAfterDrag = true; c.previewTopmost = false; c.previewMovable = false;
     wstring error;
     Check(SaveConfig(file, c, error), "save config");
     wstring warning;
@@ -559,7 +559,7 @@ void Configuration(const filesystem::path& root) {
     Check(loaded.animationLevel == 4 && loaded.animationSpeed == 2 && loaded.accentColor == 3 &&
         loaded.previewCorner == 2 && loaded.previewSize == 0 && loaded.captureShade == 75 &&
         !loaded.captureAnimation && !loaded.dragAnimation && !loaded.startupAnimation && !loaded.captureGuides &&
-        !loaded.rightClickLocation && !loaded.previewFilename && !loaded.previewHints && loaded.hideAfterDrag,
+        !loaded.rightClickLocation && !loaded.previewFilename && !loaded.previewHints && loaded.hideAfterDrag && !loaded.previewTopmost && !loaded.previewMovable,
         "animation, color, preview and capture preferences persist");
     c.previewSeconds = 0; Check(SaveConfig(file, c, error), "replace existing config atomically");
     Check(LoadConfig(file, warning).previewSeconds == 0, "updated config persisted");
@@ -568,13 +568,13 @@ void Configuration(const filesystem::path& root) {
     auto legacy = data;
     for (const auto* key : {"startup", "animationLevel", "animationSpeed", "accentColor", "previewCorner", "previewSize",
         "captureShade", "captureAnimation", "dragAnimation", "startupAnimation", "captureGuides",
-        "rightClickLocation", "previewFilename", "previewHints", "hideAfterDrag"}) legacy.erase(key);
+        "rightClickLocation", "previewFilename", "previewHints", "hideAfterDrag", "previewTopmost", "previewMovable"}) legacy.erase(key);
     { ofstream out(file); out << legacy; }
     warning.clear(); loaded = LoadConfig(file, warning);
     Check(!loaded.startup && warning.empty() && loaded.animationLevel == 3 && loaded.animationSpeed == 1 &&
         loaded.accentColor == 0 && loaded.previewCorner == 0 && loaded.previewSize == 1 && loaded.captureShade == 60 &&
         loaded.captureAnimation && loaded.dragAnimation && loaded.startupAnimation && loaded.captureGuides &&
-        loaded.rightClickLocation && loaded.previewFilename && loaded.previewHints && !loaded.hideAfterDrag,
+        loaded.rightClickLocation && loaded.previewFilename && loaded.previewHints && !loaded.hideAfterDrag && loaded.previewTopmost && loaded.previewMovable,
         "legacy config loads safe customization defaults without migration");
     { auto explicitPreset = legacy; explicitPreset["animationLevel"] = 2; ofstream out(file); out << explicitPreset; }
     warning.clear(); loaded = LoadConfig(file, warning);
@@ -605,7 +605,7 @@ void Configuration(const filesystem::path& root) {
     warning.clear(); loaded = LoadConfig(file, warning);
     Check(!warning.empty() && loaded.captureShade == 60, "capture shade lower bound validated");
     for (const auto* key : {"captureAnimation", "dragAnimation", "startupAnimation", "captureGuides",
-        "rightClickLocation", "previewFilename", "previewHints", "hideAfterDrag"}) {
+        "rightClickLocation", "previewFilename", "previewHints", "hideAfterDrag", "previewTopmost", "previewMovable"}) {
         auto invalid = data; invalid[key] = 1;
         { ofstream out(file); out << invalid; }
         warning.clear(); loaded = LoadConfig(file, warning);
@@ -823,15 +823,15 @@ void PersonalizationUi(HINSTANCE instance, const filesystem::path& root) {
     Click(settings, 430, 92);
     Check(GetSettingsState().tab == 4, "fifth interaction tab accessible");
     Snapshot(settings, root / L"settings-interaction-default-ui");
-    for (int y : {188, 300, 412, 524}) Click(settings, 250, y);
+    for (int y : {180, 268, 356, 444, 532, 620}) Click(settings, 250, y);
     auto working = GetSettingsState().working;
-    Check(!working.rightClickLocation && !working.previewFilename && !working.previewHints && working.hideAfterDrag, "four interaction switches independently change draft");
+    Check(!working.rightClickLocation && !working.previewFilename && !working.previewHints && working.hideAfterDrag && !working.previewTopmost && !working.previewMovable, "six interaction switches independently change draft");
     Click(settings, 350, 768); ShowSettings(config); Click(settings, 430, 92);
-    Check(GetSettingsState().working.rightClickLocation && !GetSettingsState().working.hideAfterDrag, "cancel discards interaction draft");
-    for (int y : {188, 300, 412, 524}) Click(settings, 250, y);
+    Check(GetSettingsState().working.rightClickLocation && !GetSettingsState().working.hideAfterDrag && GetSettingsState().working.previewTopmost && GetSettingsState().working.previewMovable, "cancel discards interaction draft");
+    for (int y : {180, 268, 356, 444, 532, 620}) Click(settings, 250, y);
     Snapshot(settings, root / L"settings-interaction-custom-ui");
     Click(settings, 100, 768);
-    Check(!SettingsVisible() && !saved.rightClickLocation && !saved.previewFilename && !saved.previewHints && saved.hideAfterDrag, "save applies interaction options");
+    Check(!SettingsVisible() && !saved.rightClickLocation && !saved.previewFilename && !saved.previewHints && saved.hideAfterDrag && !saved.previewTopmost && !saved.previewMovable, "save applies interaction options");
     ShowSettings(saved); Click(settings, 430, 92); SendMessageW(settings, WM_KEYDOWN, VK_TAB, 0);
     Check(GetSettingsState().tab == 0, "keyboard tab wraps from interaction page");
     HideSettings(); DestroySettings();
@@ -839,21 +839,44 @@ void PersonalizationUi(HINSTANCE instance, const filesystem::path& root) {
     Bitmap image(96, 64, PixelFormat32bppARGB); Graphics graphics(&image); graphics.Clear(Color(255, 45, 105, 150));
     filesystem::path file; wstring error;
     Check(SavePng(image, config.folder, file, error), "create real image fixture");
-    unsigned located = 0, edited = 0;
-    Check(InitPreview(instance, [] {}, [&] { ++edited; }, [&] { ++located; }), "initialize preview interaction callbacks");
+    unsigned located = 0, edited = 0, shared = 0;
+    Check(InitPreview(instance, [&] { ++shared; }, [&] { ++edited; }, [&] { ++located; }), "initialize preview interaction callbacks");
     ConfigurePreview(config); ShowPreview(&image, file, {300, 300}); HWND preview = OwnWindow(L"ScreenShotPlus.Preview");
+    Check((GetWindowLongPtrW(preview, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0, "default preview is topmost");
+    const auto hit = [&](int x, int y) {
+        const float scale = ui::Scale(preview);
+        POINT point{static_cast<LONG>(x * scale), static_cast<LONG>(y * scale)}; ClientToScreen(preview, &point);
+        return SendMessageW(preview, WM_NCHITTEST, 0, MAKELPARAM(point.x, point.y));
+    };
+    Check(hit(100, 25) == HTCAPTION && hit(100, 250) == HTCAPTION && hit(100, 100) == HTCLIENT &&
+        hit(290, 25) == HTCLIENT, "movable header and footer preserve image and close hit regions");
+    RECT moved{}; GetWindowRect(preview, &moved);
+    SendMessageW(preview, WM_ENTERSIZEMOVE, 0, 0);
+    SetWindowPos(preview, nullptr, moved.left + 20, moved.top + 15, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    SendMessageW(preview, WM_EXITSIZEMOVE, 0, 0);
+    ShowPreview(&image, file, {300, 300});
+    RECT retained{}; GetWindowRect(preview, &retained);
+    Check(retained.left == moved.left + 20 && retained.top == moved.top + 15, "preview retains moved position for next image");
+    Pointer(preview, WM_LBUTTONDOWN, 100, 100, MK_LBUTTON);
+    Pointer(preview, WM_MOUSEMOVE, 140, 100, MK_LBUTTON);
+    Pointer(preview, WM_LBUTTONUP, 140, 100);
+    Check(shared == 1 && edited == 0, "image drag shares while window movement is enabled");
     Snapshot(preview, root / L"preview-interaction-default-ui");
     Pointer(preview, WM_RBUTTONUP, 100, 100);
     Check(located == 1 && edited == 0, "enabled image right click routes only to locate action");
     Pointer(preview, WM_RBUTTONUP, 100, 250);
     Check(located == 1, "right click outside image does not locate");
     ConfigurePreview(saved); ShowPreview(&image, file, {300, 300});
+    Check((GetWindowLongPtrW(preview, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0 && hit(100, 25) == HTCLIENT,
+        "disabled topmost and movement apply to existing preview");
     Snapshot(preview, root / L"preview-interaction-minimal-ui");
     Pointer(preview, WM_RBUTTONUP, 100, 100); Check(located == 1, "disabled right click does not locate");
     Click(preview, 100, 100); Check(edited == 1, "left click editor works with hints hidden");
     PreviewDragResult(false); Check(PreviewVisible(), "cancelled drag keeps preview");
     PreviewDragResult(true); Check(!PreviewVisible() && filesystem::exists(file), "successful drag hides preview and preserves file");
     ConfigurePreview(config); ShowPreview(&image, file, {300, 300}); PreviewDragResult(true);
+    Check((GetWindowLongPtrW(preview, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0 && hit(100, 25) == HTCAPTION,
+        "reenabling floating controls applies immediately");
     Check(PreviewVisible(), "default successful drag keeps preview");
     DestroyPreview();
     Check(!ui::RevealFile(root / L"missing-image.png", error) && !error.empty(), "missing image produces locate error without creating paths");
